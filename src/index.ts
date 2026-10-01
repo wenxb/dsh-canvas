@@ -32,6 +32,7 @@ import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 type JsonValue = string | number | boolean | null | { [key: string]: JsonValue } | JsonValue[]
 import {
+  parseImportRequest,
   parseRevertRequest,
   parseSubmissionPayload,
   renderInteractionSubmission,
@@ -585,6 +586,93 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }), 'dsh-html-artifact: /artifact/api/list route')
 
+  // The cross-session library, for the canvas IMPORT picker.
+  //
+  // WHY A ROUTE AND NOT THE MODEL: the picker is a USER surface. Routing it
+  // through the model would mean a round-trip through an LLM to draw a list of
+  // files, and the user's choice would arrive as a chat message. The read is
+  // safe to expose because it is read-only and fenced exactly like the list
+  // route above; the IMPORT itself still runs host-side (below) and never
+  // touches the source session.
+  //
+  // `?sessionId=` narrows to one source session; `?artifactId=` additionally
+  // returns that artifact's full version list (the picker's second step).
+  ctx.effect(() => webServer.register({
+    kind: 'exact',
+    path: '/artifact/api/library',
+    handler: async (req: unknown, res: unknown) => {
+      const reply = (status: number, body: unknown): void => {
+        const response = res as { writeHead(s: number, h?: Record<string, string>): unknown; end(b: string): unknown }
+        response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
+        response.end(JSON.stringify(body))
+      }
+      if (!isTrustedRequest(req as { headers?: Record<string, string | string[] | undefined> }, trustedHosts)) {
+        reply(403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
+        return
+      }
+      const request = req as { method?: string; url?: string }
+      if (request.method !== 'GET') {
+        reply(405, { ok: false, error: { code: 'method-error', message: 'method not allowed' } })
+        return
+      }
+      const url = new URL(request.url ?? '/', 'http://dsh.internal')
+      const currentSession = url.searchParams.get('currentSessionId') ?? undefined
+      const sourceSession = url.searchParams.get('sessionId') ?? undefined
+      const artifactId = url.searchParams.get('artifactId') ?? undefined
+      try {
+        // Second step: one artifact's version list, for the version chooser.
+        if (sourceSession !== undefined && artifactId !== undefined) {
+          const snapshot = readLibraryArtifact(persistRoot, sourceSession, artifactId)
+          if (snapshot === undefined) {
+            reply(404, { ok: false, error: { code: 'not-found', message: 'no such artifact' } })
+            return
+          }
+          reply(200, {
+            ok: true,
+            artifact: {
+              sessionId: sourceSession,
+              artifactId,
+              ...snapshot.title === undefined ? {} : { title: snapshot.title },
+              interactive: snapshot.interactive === true,
+              bytes: bytesOf(snapshot.html),
+              versions: snapshot.versions.map(entry => ({
+                version: entry.version,
+                time: entry.time,
+                bytes: bytesOf(entry.html),
+              })),
+            },
+          })
+          return
+        }
+        // First step: sessions and their importable artifacts.
+        const titles = await readSessionTitles(ctx, sourceSession === undefined ? undefined : [sourceSession])
+        const sessions = scanLibrary(persistRoot, {
+          ...currentSession === undefined || currentSession === '' ? {} : { excludeSessionId: currentSession },
+          ...sourceSession === undefined ? {} : { sessionId: sourceSession },
+          limit: LIBRARY_MAX_ARTIFACTS,
+          ...titles.size === 0 ? {} : { titles },
+        })
+        reply(200, {
+          ok: true,
+          sessions: sessions.map(session => ({
+            sessionId: session.sessionId,
+            ...session.title === undefined ? {} : { title: session.title },
+            artifacts: session.artifacts.map(artifact => ({
+              artifactId: artifact.artifactId,
+              ...artifact.title === undefined ? {} : { title: artifact.title },
+              interactive: artifact.interactive === true,
+              versions: artifact.versionCount,
+              bytes: artifact.bytes,
+              ...artifact.origin === undefined ? {} : { origin: artifact.origin },
+            })),
+          })),
+        })
+      } catch (error) {
+        reply(500, { ok: false, error: { code: 'internal', message: error instanceof Error ? error.message : String(error) } })
+      }
+    },
+  }), 'dsh-html-artifact: /artifact/api/library route')
+
   // Interaction submission: the browser half records user interaction data
   // from a sandboxed artifact surface through this slash command (host-side,
   // never sent to the model as a chat message). The submission is delivered
@@ -629,6 +717,78 @@ export function apply(ctx: Context, config: Config = {}): void {
         }
         store.revertTo(parsed.value.id, parsed.value.version)
         return { kind: 'success', text: `已回退 artifact ${parsed.value.id} 到 版本 ${parsed.value.version}（仅本地回退）` }
+      } catch (error) {
+        return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
+      }
+    },
+  })
+
+  // User-side IMPORT: the canvas library picker runs this command after the
+  // user picks a source artifact and (optionally) which versions to carry over.
+  //
+  // WHY THIS WAKES THE MODEL, UNLIKE `artifact-revert`: an import creates a
+  // brand-new artifact in THIS session that the model has never seen and cannot
+  // infer. A silent import would leave the model holding a stale artifact list —
+  // it would keep patching the old artifact and be surprised by a new id. The
+  // notice is a plugin-source message, so the model learns the new id and
+  // version layout without the user having to type anything.
+  ctx.commands.register({
+    name: 'artifact-import',
+    description: 'Import an artifact from another session into this one, as a NEW artifact.',
+    recordInput: false,
+    handler: (invocation) => {
+      const parsed = parseImportRequest(invocation.rawInput)
+      if (!parsed.ok) return { kind: 'error', text: parsed.error }
+      const request = parsed.value
+      const agent = invocation.agent
+      const currentSession = agent === undefined ? undefined : sessionIdOf(agent)
+      // Importing a session into itself would mint a duplicate of an artifact
+      // the user already has — almost certainly a picker bug, not intent.
+      if (currentSession !== undefined && currentSession === request.sessionId) {
+        return { kind: 'error', text: 'artifact-import: that artifact is already in this session' }
+      }
+      const snapshot = readLibraryArtifact(persistRoot, request.sessionId, request.artifactId)
+      if (snapshot === undefined) {
+        return { kind: 'error', text: `artifact-import: no artifact ${request.artifactId} in session ${request.sessionId}` }
+      }
+      try {
+        const store = storeFor(agent, persistRoot)
+        const wanted = request.versions === undefined ? undefined : new Set(request.versions)
+        const sourceVersions = wanted === undefined
+          ? []
+          : snapshot.versions.filter(entry => wanted.has(entry.version))
+        if (wanted !== undefined && sourceVersions.length === 0) {
+          return {
+            kind: 'error',
+            text: `artifact-import: none of the requested versions exist in ${request.artifactId} (it has ${snapshot.versions.length})`,
+          }
+        }
+        const title = request.title ?? snapshot.title
+        const { id, versions } = store.importArtifact({
+          html: snapshot.html,
+          ...title === undefined ? {} : { title },
+          ...snapshot.interactive === undefined ? {} : { interactive: snapshot.interactive },
+          versions: sourceVersions,
+          origin: { sessionId: request.sessionId, artifactId: request.artifactId },
+        }, maxArtifactBytes, { includeVersions: wanted !== undefined })
+        // Wake the model with the new identity, so it patches the RIGHT artifact.
+        if (agent !== undefined) {
+          agent.followup(createUserMessage({
+            content: [{
+              type: 'text',
+              text: `[artifact 导入] 用户从会话 ${request.sessionId} 导入了 ${request.artifactId}，`
+                + `在当前会话创建为新 artifact ${id}（版本 ${versions} 个已带过来）。`
+                + `后续修改请使用 ${id}。`,
+            }],
+            source: {
+              kind: 'plugin',
+              plugin: name,
+              form: 'notice',
+              summary: `导入 artifact ${request.artifactId} → ${id}`,
+            },
+          }))
+        }
+        return { kind: 'success', text: `已导入 artifact ${id}（来自 ${request.sessionId}/${request.artifactId}）` }
       } catch (error) {
         return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
       }

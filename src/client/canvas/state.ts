@@ -171,6 +171,15 @@ export interface CanvasSnapshot {
 let activeSessions: ISessions | undefined
 let activeSessionId: SessionId | undefined
 
+/**
+ * The session the canvas is currently bound to, for UI that addresses it
+ * directly (the import picker excludes it from the cross-session listing).
+ * @returns the bound session id, or undefined before the binding settles.
+ */
+export function activeSessionIdOf(): string | undefined {
+  return activeSessionId
+}
+
 /** Tolerantly read the op/id off a running call's (possibly partial) args. */
 function runningOpOf(argsRaw: string): { op: string; id: string } | null {
   const op = /"op"\s*:\s*"([a-z]+)"/.exec(argsRaw)?.[1]
@@ -1360,5 +1369,156 @@ export function submitRevert(artifactId: string, version: number, title: string 
     id: artifactId,
     version,
     ...title === undefined ? {} : { title },
+  })}`)
+}
+
+/** One importable artifact in the cross-session library, as the route reports it. */
+export interface LibraryArtifact {
+  artifactId: string
+  title?: string
+  interactive?: boolean
+  /** How many saved versions the source has (the chooser's upper bound). */
+  versions: number
+  bytes: number
+  origin?: { sessionId: string; artifactId: string }
+}
+
+/** One source session and its importable artifacts. */
+export interface LibrarySession {
+  sessionId: string
+  title?: string
+  artifacts: LibraryArtifact[]
+}
+
+/** One saved version of a source artifact, for the version chooser. */
+export interface LibraryVersion {
+  version: number
+  time: number
+  bytes: number
+}
+
+/** The library listing, or a reason it is unavailable. */
+export type LibraryListing =
+  | { ok: true; sessions: LibrarySession[] }
+  | { ok: false; reason: string }
+
+/**
+ * The host's saved-version cap, mirrored for the picker.
+ *
+ * MUST equal the host's `MAX_VERSIONS`; tests/contracts.spec.ts asserts it. The
+ * host trims a source artifact's history when an import carries more versions
+ * than it can keep, so the picker must not offer a selection the store will
+ * silently truncate.
+ */
+export const MAX_IMPORT_VERSIONS = 20
+
+/**
+ * Read the cross-session artifact library.
+ *
+ * Returns a discriminated result rather than throwing, because the picker's
+ * only job on failure is to show the reason: the route is fenced, so a 403
+ * means the host half is not loaded or the page is cross-origin, and that is
+ * worth saying out loud instead of rendering an empty list the user would read
+ * as "you have no other artifacts".
+ * @param currentSessionId - excluded from the listing (already in the store).
+ * @returns the listing, or a reason it could not be read.
+ */
+export async function fetchLibrary(currentSessionId: string | undefined): Promise<LibraryListing> {
+  const query = currentSessionId === undefined ? '' : `?currentSessionId=${encodeURIComponent(currentSessionId)}`
+  try {
+    const response = await fetch(`/artifact/api/library${query}`)
+    if (!response.ok) return { ok: false, reason: `库读取失败（HTTP ${response.status}）` }
+    const body = await response.json() as { ok?: unknown; sessions?: unknown }
+    if (body.ok !== true || !Array.isArray(body.sessions)) return { ok: false, reason: '库返回了意外的数据' }
+    const sessions: LibrarySession[] = []
+    for (const raw of body.sessions) {
+      if (raw === null || typeof raw !== 'object') continue
+      const entry = raw as { sessionId?: unknown; title?: unknown; artifacts?: unknown }
+      if (typeof entry.sessionId !== 'string' || !Array.isArray(entry.artifacts)) continue
+      const artifacts: LibraryArtifact[] = []
+      for (const item of entry.artifacts) {
+        if (item === null || typeof item !== 'object') continue
+        const a = item as Record<string, unknown>
+        if (typeof a.artifactId !== 'string') continue
+        const originRaw = a.origin as { sessionId?: unknown; artifactId?: unknown } | undefined
+        const origin = originRaw !== undefined
+          && typeof originRaw.sessionId === 'string' && typeof originRaw.artifactId === 'string'
+          ? { sessionId: originRaw.sessionId, artifactId: originRaw.artifactId }
+          : undefined
+        artifacts.push({
+          artifactId: a.artifactId,
+          ...typeof a.title === 'string' ? { title: a.title } : {},
+          ...a.interactive === true ? { interactive: true } : {},
+          versions: typeof a.versions === 'number' ? a.versions : 1,
+          bytes: typeof a.bytes === 'number' ? a.bytes : 0,
+          ...origin === undefined ? {} : { origin },
+        })
+      }
+      if (artifacts.length === 0) continue
+      sessions.push({
+        sessionId: entry.sessionId,
+        ...typeof entry.title === 'string' ? { title: entry.title } : {},
+        artifacts,
+      })
+    }
+    return { ok: true, sessions }
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/**
+ * Read one source artifact's saved versions, for the import version chooser.
+ * @param sessionId - the source session.
+ * @param artifactId - the source artifact.
+ * @returns the version list, or a reason it could not be read.
+ */
+export async function fetchLibraryVersions(
+  sessionId: string,
+  artifactId: string,
+): Promise<{ ok: true; versions: LibraryVersion[] } | { ok: false; reason: string }> {
+  try {
+    const response = await fetch(`/artifact/api/library?sessionId=${encodeURIComponent(sessionId)}&artifactId=${encodeURIComponent(artifactId)}`)
+    if (!response.ok) return { ok: false, reason: `版本读取失败（HTTP ${response.status}）` }
+    const body = await response.json() as { ok?: unknown; artifact?: { versions?: unknown } }
+    if (body.ok !== true || !Array.isArray(body.artifact?.versions)) {
+      return { ok: false, reason: '版本列表返回了意外的数据' }
+    }
+    const versions: LibraryVersion[] = []
+    for (const raw of body.artifact.versions) {
+      if (raw === null || typeof raw !== 'object') continue
+      const entry = raw as { version?: unknown; time?: unknown; bytes?: unknown }
+      if (typeof entry.version !== 'number') continue
+      versions.push({
+        version: entry.version,
+        time: typeof entry.time === 'number' ? entry.time : 0,
+        bytes: typeof entry.bytes === 'number' ? entry.bytes : 0,
+      })
+    }
+    return { ok: true, versions }
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/**
+ * Run a cross-session import through the `/artifact-import` command.
+ *
+ * `versions` is omitted for the default (working copy only). Passing an array
+ * carries exactly those saved versions.
+ * @param sessionId - the source session.
+ * @param artifactId - the source artifact.
+ * @param versions - source versions to carry over; omit for the working copy.
+ * @returns whether the command matched and executed.
+ */
+export function submitImport(
+  sessionId: string,
+  artifactId: string,
+  versions: number[] | undefined,
+): Promise<boolean> {
+  return runCommand(`/artifact-import ${JSON.stringify({
+    sessionId,
+    artifactId,
+    ...versions === undefined || versions.length === 0 ? {} : { versions },
   })}`)
 }

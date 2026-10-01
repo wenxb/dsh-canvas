@@ -460,3 +460,101 @@
   padding: 24px;
   text-align: center;
 }
+
+/* ── Cross-session import picker ────────────────────────────────────────────
+   Two steps in one panel: pick a source artifact, then choose which of its
+   saved versions to carry over. Reuses the empty-state picker card vocabulary
+   above so the two pickers read as the same surface. */
+.libPanel {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  gap: 10px;
+}
+
+.libHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.libHeadTitle {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--dsw-alias-label-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.libSession {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: none;
+}
+
+.libSessionName {
+  font-size: 11px;
+  color: var(--dsw-alias-label-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Version chooser rows: a checkbox-ish toggle plus the version metadata. */
+.libVersion {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--dsw-radius-sm);
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.libVersion:hover { background: var(--dsw-alias-interactive-bg-hover) }
+
+.libVersionMeta {
+  flex: 1;
+  min-width: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.libError {
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 12px;
+}
+
+.libNote {
+  font-size: 11.5px;
+  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary));
+  line-height: 1.5;
+}
+
+.libActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding-top: 4px;
+}
+
+.libLoading {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12.5px;
+  padding: 12px;
+  text-align: center;
+}

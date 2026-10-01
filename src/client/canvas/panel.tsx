@@ -21,14 +21,21 @@
  * @module
  */
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
-import { canvasBridge, submitInteraction, submitRevert, useCanvasState, type CanvasSnapshot } from './state.ts'
+import { canvasBridge, fetchLibrary, fetchLibraryVersions, submitImport, submitInteraction, submitRevert, useCanvasState, activeSessionIdOf, MAX_IMPORT_VERSIONS, type CanvasSnapshot, type LibraryArtifact, type LibraryListing, type LibraryVersion } from './state.ts'
 import { buildSandboxedHtmlDocument, useArtifactTheme } from '../sandbox.ts'
 import { buildStreamingBridgeDocument } from '../stream/bridge.ts'
-import { IconCheck, IconChevronLeft, IconChevronRight, IconCode, IconDownload, IconEye, IconFileCode, IconRefresh, IconRevert, IconSend } from '../icons.tsx'
+import { IconCheck, IconChevronLeft, IconChevronRight, IconCode, IconDownload, IconEye, IconFileCode, IconImport, IconRefresh, IconRevert, IconSend } from '../icons.tsx'
 import css from '../artifact.module.css'
 import { highlightHtml } from '../highlight.ts'
 
 /** Ask a settled surface's collect bridge for its interaction data. */
+/** Format a byte COUNT (already known) for picker metadata. */
+function formatBytes(count: number): string {
+  if (count >= 1024 * 1024) return `${(count / (1024 * 1024)).toFixed(1)} MB`
+  if (count >= 1024) return `${(count / 1024).toFixed(1)} KB`
+  return `${count} B`
+}
+
 function collectFrame(frame: HTMLIFrameElement | null, postMessageId: string, timeoutMs = 2500): Promise<unknown | undefined> {
   const win = frame === null ? undefined : frame.contentWindow
   if (frame === null || win === undefined || win === null) return Promise.resolve(undefined)
@@ -94,6 +101,189 @@ function ArtifactPicker({ state }: { state: CanvasSnapshot }) {
 }
 
 /**
+ * The cross-session import picker: browse artifacts other sessions persisted,
+ * then choose which of the source's saved versions to carry over.
+ *
+ * TWO STEPS, ONE PANEL. Step 1 lists source sessions and their artifacts;
+ * choosing one loads its version list (step 2) so the default stays cheap: the
+ * review's motivating case was a 17-version artifact totalling ~2 MB, where
+ * "carry everything" is never what the user wants as the initial state.
+ *
+ * The default selection is the NEWEST version — not "all", and not the working
+ * copy. That mirrors what a person means by "import that canvas": the latest
+ * good state. The working copy is offered as an explicit row because it may
+ * hold unsaved work that exists nowhere else, so hiding it would lose data.
+ *
+ * @param props.onClose - leave the picker without importing.
+ */
+function ImportPicker({ onClose }: { onClose: () => void }) {
+  const [listing, setListing] = useState<LibraryListing | undefined>(undefined)
+  const [chosen, setChosen] = useState<{ sessionId: string; artifact: LibraryArtifact } | undefined>(undefined)
+  const [versions, setVersions] = useState<LibraryVersion[] | undefined>(undefined)
+  const [versionError, setVersionError] = useState<string | undefined>(undefined)
+  const [picked, setPicked] = useState<ReadonlySet<number>>(new Set())
+  const [includeWorking, setIncludeWorking] = useState(true)
+  const [phase, setPhase] = useState<'idle' | 'busy' | 'fail'>('idle')
+  const [error, setError] = useState<string | undefined>(undefined)
+
+  useEffect(() => {
+    let live = true
+    void fetchLibrary(activeSessionIdOf()).then(result => {
+      if (live) setListing(result)
+    })
+    return () => { live = false }
+  }, [])
+
+  // Load the version list when a source artifact is chosen. The newest version
+  // starts selected: the common intent, and it keeps the payload to one version.
+  useEffect(() => {
+    if (chosen === undefined) return
+    let live = true
+    setVersions(undefined)
+    setVersionError(undefined)
+    void fetchLibraryVersions(chosen.sessionId, chosen.artifact.artifactId).then(result => {
+      if (!live) return
+      if (!result.ok) {
+        setVersionError(result.reason)
+        return
+      }
+      setVersions(result.versions)
+      const newest = result.versions[result.versions.length - 1]
+      setPicked(newest === undefined ? new Set() : new Set([newest.version]))
+      setIncludeWorking(newest === undefined)
+    })
+    return () => { live = false }
+  }, [chosen])
+
+  const doImport = (): void => {
+    if (chosen === undefined) return
+    setPhase('busy')
+    setError(undefined)
+    // `undefined` versions means "working copy only" — the import default. When
+    // the user picked saved versions, send exactly those; the working copy can
+    // travel alongside as the newest selected version's content.
+    const selection = [...picked].sort((a, b) => a - b)
+    void submitImport(
+      chosen.sessionId,
+      chosen.artifact.artifactId,
+      selection.length === 0 ? undefined : selection,
+    ).then(ok => {
+      if (ok) {
+        onClose()
+        return
+      }
+      setPhase('fail')
+      setError('导入命令未执行——宿主可能未加载插件，或会话绑定已失效')
+    })
+  }
+
+  return (
+    <div className={css.libPanel}>
+      <div className={css.libHead}>
+        <span className={css.libHeadTitle}>
+          {chosen === undefined ? '从其他会话导入' : (chosen.artifact.title ?? chosen.artifact.artifactId)}
+        </span>
+        <button type="button" className={css.iconBtn} onClick={onClose} title="取消">取消</button>
+      </div>
+
+      {listing === undefined && <div className={css.libLoading}>读取中…</div>}
+
+      {listing !== undefined && !listing.ok && (
+        <div className={css.libError}>{listing.reason}</div>
+      )}
+
+      {listing !== undefined && listing.ok && listing.sessions.length === 0 && (
+        <div className={css.emptyHint}>还没有其他会话留下 artifact。画布内容会按会话落盘，之后可在这里导入。</div>
+      )}
+
+      {/* Step 1 — source artifacts. */}
+      {chosen === undefined && listing !== undefined && listing.ok && listing.sessions.map(session => (
+        <div key={session.sessionId} className={css.libSession}>
+          <span className={css.libSessionName} title={session.title ?? session.sessionId}>
+            {session.title ?? session.sessionId}
+          </span>
+          {session.artifacts.map(artifact => (
+            <button
+              key={artifact.artifactId}
+              type="button"
+              className={css.pickCard}
+              onClick={() => setChosen({ sessionId: session.sessionId, artifact })}
+            >
+              <span className={css.pickCardTop}>
+                <span className={css.pickCardIcon}><IconImport size={16} /></span>
+                <span className={css.pickCardTitle}>{artifact.title ?? artifact.artifactId}</span>
+                <span className={css.pickCardVer}>{artifact.versions} 版本</span>
+              </span>
+              <span className={css.pickCardBottom}>
+                <span className={css.pickCardId}>{formatBytes(artifact.bytes)}</span>
+                {artifact.origin !== undefined && <span className={css.pickCardDirty}>转自其他会话</span>}
+              </span>
+            </button>
+          ))}
+        </div>
+      ))}
+
+      {/* Step 2 — which versions to carry. */}
+      {chosen !== undefined && (
+        <>
+          {versions === undefined && versionError === undefined && <div className={css.libLoading}>读取版本…</div>}
+          {versionError !== undefined && <div className={css.libError}>{versionError}</div>}
+          {versions !== undefined && (
+            <>
+              {versions.length > MAX_IMPORT_VERSIONS && (
+                <div className={css.libNote}>源 artifact 有 {versions.length} 个版本，超过上限 {MAX_IMPORT_VERSIONS}，只会保留最新的 {MAX_IMPORT_VERSIONS} 个。</div>
+              )}
+              <label className={css.libVersion}>
+                <input
+                  type="checkbox"
+                  checked={includeWorking}
+                  onChange={event => setIncludeWorking(event.target.checked)}
+                />
+                <span>当前内容（工作副本）</span>
+              </label>
+              {versions.length > 0 && <div className={css.libNote}>或选择带过来的已保存版本：</div>}
+              {versions.map(entry => (
+                <label key={entry.version} className={css.libVersion}>
+                  <input
+                    type="checkbox"
+                    checked={picked.has(entry.version)}
+                    onChange={event => setPicked(previous => {
+                      const next = new Set(previous)
+                      if (event.target.checked) next.add(entry.version)
+                      else next.delete(entry.version)
+                      return next
+                    })}
+                  />
+                  <span>版本 {entry.version}</span>
+                  <span className={css.libVersionMeta}>
+                    {formatBytes(entry.bytes)} · {new Date(entry.time).toLocaleString()}
+                  </span>
+                </label>
+              ))}
+              <div className={css.libNote}>
+                导入会在本会话创建一个<strong>新的</strong> artifact（新 id），源会话不会被改动。
+              </div>
+            </>
+          )}
+          {error !== undefined && <div className={css.libError}>{error}</div>}
+          <div className={css.libActions}>
+            <button type="button" className={css.iconBtn} onClick={() => setChosen(undefined)} disabled={phase === 'busy'}>返回</button>
+            <button
+              type="button"
+              className={css.iconBtn}
+              onClick={doImport}
+              disabled={phase === 'busy' || (picked.size === 0 && !includeWorking)}
+            >
+              <IconImport size={14} />{phase === 'busy' ? '导入中…' : '导入'}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+/**
  * The canvas panel body (shared by both mounts).
  * @param props - state + fullscreen flag.
  */
@@ -115,6 +305,8 @@ function CanvasBody({ state }: { state: CanvasSnapshot }) {
    *  post-submit state reset (a remount re-runs the page's scripts, which is
    *  exactly the artifact's initial state). */
   const [refreshTick, setRefreshTick] = useState(0)
+  /** The cross-session import picker is open (its own panel, above the body). */
+  const [importing, setImporting] = useState(false)
   const settledPostId = useId()
   const streamPostId = useId()
 
@@ -336,6 +528,13 @@ function CanvasBody({ state }: { state: CanvasSnapshot }) {
               <IconDownload />下载
             </button>
           )}
+          <button
+            type="button" className={css.textBtn}
+            onClick={() => setImporting(true)}
+            title="从其他会话导入 artifact"
+          >
+            <IconImport />导入
+          </button>
           {displayHtml !== undefined && streaming === undefined && (
             <button
               type="button" className={css.textBtn}
@@ -384,7 +583,9 @@ function CanvasBody({ state }: { state: CanvasSnapshot }) {
         </div>
       </header>
 
-      {streaming !== undefined ? (
+      {importing ? (
+        <ImportPicker onClose={() => setImporting(false)} />
+      ) : streaming !== undefined ? (
         <div className={css.canvasBody}>
           <div className={css.genBar}>
             <i className={css.pulse} />
@@ -430,6 +631,9 @@ function CanvasBody({ state }: { state: CanvasSnapshot }) {
             <>
               <p>还没有可预览的 HTML artifact。</p>
               <p className={css.emptyHint}>让模型调用 artifact 工具创建一个，这里会自动打开并实时预览；每个保存的版本都可以在这里回看与回退。</p>
+              <button type="button" className={css.textBtn} onClick={() => setImporting(true)}>
+                <IconImport />从其他会话导入
+              </button>
             </>
           )}
         </div>
