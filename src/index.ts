@@ -339,9 +339,18 @@ function storeFor(agent: Agent | undefined, persistRoot: string | undefined): Ar
  */
 async function readSessionTitles(ctx: Context, only?: string[]): Promise<Map<string, string>> {
   const titles = new Map<string, string>()
-  const query = (ctx as unknown as {
-    sessionQuery?: { readTitleSnapshots(ids: readonly string[]): Promise<readonly { sessionId: string; status: string; value?: { title?: { title?: string } } }[]> }
-  }).sessionQuery
+  // `ctx.get()`, NOT `ctx.sessionQuery`: the context proxy THROWS on an
+  // undeclared property ("cannot get property \"sessionQuery\" without
+  // inject"), and `sessionQuery` is deliberately not injected — declaring it
+  // would make it REQUIRED and prevent the plugin from loading in a profile
+  // that lacks it. A TypeScript cast silences the compiler but not the runtime
+  // proxy, so the throw escaped the try/catch below (it is raised by the
+  // property ACCESS, before the call) and turned every library listing into a
+  // 500. Caught by live verification; no unit test could reach this, because a
+  // stand-in ctx has no proxy to throw.
+  const query = ctx.get('sessionQuery') as
+    | { readTitleSnapshots(ids: readonly string[]): Promise<readonly { sessionId: string; status: string; value?: { title?: { title?: string } } }[]> }
+    | undefined
   if (query === undefined) return titles
   try {
     const results = await query.readTitleSnapshots(only ?? librarySessionIds(DEFAULT_PERSIST_ROOT()))

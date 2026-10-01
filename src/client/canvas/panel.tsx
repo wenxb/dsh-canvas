@@ -288,7 +288,7 @@ function ImportPicker({ onClose }: { onClose: () => void }) {
  * The canvas panel body (shared by both mounts).
  * @param props - state + fullscreen flag.
  */
-function CanvasBody({ state }: { state: CanvasSnapshot }) {
+function CanvasBody({ state, onImport }: { state: CanvasSnapshot; onImport: () => void }) {
   // Live host scheme: switching light/dark re-themes both surfaces via
   // postMessage instead of remounting, so an artifact's runtime state (a game
   // in progress, a form half-filled) survives the switch.
@@ -306,8 +306,6 @@ function CanvasBody({ state }: { state: CanvasSnapshot }) {
    *  post-submit state reset (a remount re-runs the page's scripts, which is
    *  exactly the artifact's initial state). */
   const [refreshTick, setRefreshTick] = useState(0)
-  /** The cross-session import picker is open (its own panel, above the body). */
-  const [importing, setImporting] = useState(false)
   const settledPostId = useId()
   const streamPostId = useId()
 
@@ -531,7 +529,7 @@ function CanvasBody({ state }: { state: CanvasSnapshot }) {
           )}
           <button
             type="button" className={css.textBtn}
-            onClick={() => setImporting(true)}
+            onClick={onImport}
             title="从其他会话导入 artifact"
           >
             <IconImport />导入
@@ -584,9 +582,7 @@ function CanvasBody({ state }: { state: CanvasSnapshot }) {
         </div>
       </header>
 
-      {importing ? (
-        <ImportPicker onClose={() => setImporting(false)} />
-      ) : streaming !== undefined ? (
+      {streaming !== undefined ? (
         <div className={css.canvasBody}>
           <div className={css.genBar}>
             <i className={css.pulse} />
@@ -632,7 +628,7 @@ function CanvasBody({ state }: { state: CanvasSnapshot }) {
             <>
               <p>还没有可预览的 HTML artifact。</p>
               <p className={css.emptyHint}>让模型调用 artifact 工具创建一个，这里会自动打开并实时预览；每个保存的版本都可以在这里回看与回退。</p>
-              <button type="button" className={css.textBtn} onClick={() => setImporting(true)}>
+              <button type="button" className={css.textBtn} onClick={onImport}>
                 <IconImport />从其他会话导入
               </button>
             </>
@@ -686,6 +682,19 @@ function CanvasBody({ state }: { state: CanvasSnapshot }) {
  */
 export function CanvasTabContent() {
   const state = useCanvasState()
+  /**
+   * The cross-session import picker, owned HERE and not in the body.
+   *
+   * THIS IS A REACHABILITY FIX, not a style choice. Both of the body's import
+   * affordances (the header button and the empty-state button) live inside
+   * `CanvasBody`, which this component renders only when `selectedId !==
+   * undefined`. On a session with no artifacts yet — the exact moment importing
+   * one is most useful, and the only way to get a first artifact without the
+   * model — `selectedId` IS undefined, so the body never rendered and BOTH
+   * buttons were dead. Lifting the picker above the gate makes it reachable
+   * from the one state that has no other controls.
+   */
+  const [importing, setImporting] = useState(false)
   // First render with no selection: exactly one artifact → open it directly
   // (the model just created it — the user wants the canvas, not a picker);
   // multiple → the picker; none → the empty hint.
@@ -701,6 +710,10 @@ export function CanvasTabContent() {
     const only = alive[0]
     if (alive.length === 1 && only !== undefined) canvasBridge.select(only)
   }, [state.selectedId, state.order])
+  // The picker is reachable from EVERY state, including the first open of a
+  // session with no artifacts (see the `importing` declaration above).
+  if (importing) return <ImportPicker onClose={() => setImporting(false)} />
+  const openImport = (): void => setImporting(true)
   if (state.selectedId === undefined) {
     if (state.order.some(id => state.timelines.get(id)?.destroyed !== true)) {
       return (
@@ -708,10 +721,25 @@ export function CanvasTabContent() {
           <IconCode size={20} />
           <p className={css.pickCardHint}>选择要查看的 artifact：</p>
           <ArtifactPicker state={state} />
+          <button type="button" className={css.textBtn} onClick={openImport}>
+            <IconImport />从其他会话导入
+          </button>
         </div>
       )
     }
-    return <div className={css.tabEmpty}>会话里还没有 HTML artifact — 让模型调用 artifact 工具创建一个。</div>
+    return (
+      <div className={css.tabEmpty}>
+        <IconCode size={20} />
+        <p>会话里还没有 HTML artifact — 让模型调用 artifact 工具创建一个。</p>
+        {/* The ONE state with no other controls, and the moment importing is
+            most valuable: it is the only way to get a first artifact without
+            the model, and every other affordance in this plugin is hidden
+            until an artifact exists. */}
+        <button type="button" className={css.textBtn} onClick={openImport}>
+          <IconImport />从其他会话导入
+        </button>
+      </div>
+    )
   }
-  return <CanvasBody state={state} />
+  return <CanvasBody state={state} onImport={openImport} />
 }
