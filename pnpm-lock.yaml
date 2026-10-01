@@ -16,7 +16,7 @@ importers:
         version: file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-agent(1287eb950635d9f1ae7e6154b2f90987)
       '@deepseek-ai/dsh-api-session-controller':
         specifier: file:/home/youngwen/.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-api-session-controller
-        version: file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-api-session-controller(deeb7d039df42652637d0d493e30d2eb)
+        version: file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-api-session-controller(08ae556acd10bb67d96c82b86387914b)
       '@deepseek-ai/dsh-client-ui-chat':
         specifier: file:/home/youngwen/.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-chat
         version: file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-chat(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis)
@@ -38,6 +38,9 @@ importers:
       '@deepseek-ai/dsh-session':
         specifier: file:/home/youngwen/.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session
         version: file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis)(@deepseek-ai/dsh-scope@0.1.5-rc.2(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis)(@deepseek-ai/dsh-invariants@0.1.5-rc.2(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis)))
+      '@deepseek-ai/dsh-skill':
+        specifier: file:/home/youngwen/.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-skill
+        version: file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-skill(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis)(@deepseek-ai/dsh-llm@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis))(@deepseek-ai/dsh-scope@0.1.5-rc.2(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis)(@deepseek-ai/dsh-invariants@0.1.5-rc.2(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis)))
       '@deepseek-ai/dsh-tools':
         specifier: file:/home/youngwen/.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tools
         version: file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tools(a5d92b1f67344f9e2bcfcb33b6d98353)
@@ -438,9 +441,8 @@ packages:
       '@deepseek-ai/dsh-session': ^0.1.5-rc.2
       '@deepseek-ai/schemastery': ^3.18.2
 
-  '@deepseek-ai/dsh-skill@0.1.5-rc.2':
-    resolution: {integrity: sha512-Z1mouW3vTzmYk9OAGUp7S9oOB4k9+qr8BpD7KPAR0nAPX1XOxyKA7zQA/6P0tMS69/aS7UsyLZNz9+RG8ZZ8Wg==}
-    version: 0.1.5-rc.2
+  '@deepseek-ai/dsh-skill@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-skill':
+    resolution: {directory: ../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-skill, type: directory}
     peerDependencies:
       '@deepseek-ai/cordis': ^4.0.2
       '@deepseek-ai/dsh-llm': ^0.1.5-rc.2
@@ -1656,7 +1658,7 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  '@deepseek-ai/dsh-api-session-controller@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-api-session-controller(deeb7d039df42652637d0d493e30d2eb)':
+  '@deepseek-ai/dsh-api-session-controller@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-api-session-controller(08ae556acd10bb67d96c82b86387914b)':
     dependencies:
       '@deepseek-ai/cordis': file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis(@deepseek-ai/cordis-plugin-include@1.0.7)(@deepseek-ai/cordis-plugin-loader@1.0.3)
       '@deepseek-ai/dsh-agent': file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-agent(1287eb950635d9f1ae7e6154b2f90987)
@@ -1678,7 +1680,7 @@ snapshots:
       '@deepseek-ai/dsh-session-projection': 0.1.5-rc.2(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis)(@deepseek-ai/dsh-session@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis)(@deepseek-ai/dsh-scope@0.1.5-rc.2(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis)(@deepseek-ai/dsh-invariants@0.1.5-rc.2(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis))))
       '@deepseek-ai/dsh-session-query': 0.1.5-rc.2(dad561f14f2293f835b6766054ff905c)
       '@deepseek-ai/dsh-session-title': 0.1.5-rc.2(e868ef172a8cd5b03e49fbcdfbf9f913)
-      '@deepseek-ai/dsh-skill': 0.1.5-rc.2(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis)(@deepseek-ai/dsh-llm@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis))(@deepseek-ai/dsh-scope@0.1.5-rc.2(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis)(@deepseek-ai/dsh-invariants@0.1.5-rc.2(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis)))
+      '@deepseek-ai/dsh-skill': file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-skill(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis)(@deepseek-ai/dsh-llm@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis))(@deepseek-ai/dsh-scope@0.1.5-rc.2(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis)(@deepseek-ai/dsh-invariants@0.1.5-rc.2(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis)))
       '@deepseek-ai/dsh-subagent': 0.1.5-rc.2(ff66875fd822e796a5a50bdc645f0aa7)
       '@deepseek-ai/dsh-typert-protocol': 0.1.5-rc.2(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis)
       '@deepseek-ai/dsh-typert-registry': 0.1.5-rc.2(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis)
@@ -1887,7 +1889,7 @@ snapshots:
       '@deepseek-ai/dsh-util-values': 0.1.5-rc.2(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis)
       '@deepseek-ai/schemastery': file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/schemastery
 
-  '@deepseek-ai/dsh-skill@0.1.5-rc.2(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis)(@deepseek-ai/dsh-llm@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis))(@deepseek-ai/dsh-scope@0.1.5-rc.2(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis)(@deepseek-ai/dsh-invariants@0.1.5-rc.2(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis)))':
+  '@deepseek-ai/dsh-skill@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-skill(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis)(@deepseek-ai/dsh-llm@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis))(@deepseek-ai/dsh-scope@0.1.5-rc.2(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis)(@deepseek-ai/dsh-invariants@0.1.5-rc.2(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis)))':
     dependencies:
       '@deepseek-ai/cordis': file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis(@deepseek-ai/cordis-plugin-include@1.0.7)(@deepseek-ai/cordis-plugin-loader@1.0.3)
       '@deepseek-ai/dsh-llm': file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm(@deepseek-ai/cordis@file:../../.nvm/versions/node/v24.18.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis)

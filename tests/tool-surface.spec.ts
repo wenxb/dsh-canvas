@@ -50,7 +50,13 @@ function captureArtifactTool(): CapturedTool {
     commands: { register: () => () => {} },
     webServer: { register: () => () => {} },
     effect: (fn: () => unknown) => (typeof fn === 'function' ? fn() : undefined),
-    inject: () => () => {},
+    // `skills` is an OPTIONAL injection: the callback runs only when the service
+    // exists. Stubbed here so `apply()` completes; the skill itself is covered
+    // in tests/skill.spec.ts.
+    inject: (_deps: unknown, callback: (ctx: unknown) => void) => {
+      callback({ skills: { register: () => () => {} } })
+      return () => {}
+    },
     get: () => undefined,
     on: () => () => {},
     logger: { warn: () => {}, info: () => {}, error: () => {} },

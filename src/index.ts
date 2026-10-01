@@ -23,6 +23,10 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-commands'
+// Type-only: activates the `ctx.skills` Context augmentation without emitting an
+// import at runtime (the service is resolved through `ctx.inject`, so a profile
+// without the skill registry still loads this plugin).
+import type {} from '@deepseek-ai/dsh-skill'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -36,6 +40,13 @@ import {
 import { ArtifactStore, UnknownVersionError, rebuildFromMetas, truncateHtml, type ArtifactMetaLike } from './registry.ts'
 import { DEFAULT_PERSIST_ROOT, makePersister, persistDirFor, type ArtifactPersistence } from './persistence.ts'
 import { LIBRARY_MAX_ARTIFACTS, librarySessionIds, readLibraryArtifact, scanLibrary } from './library.ts'
+import {
+  ARTIFACT_SKILL_BODY,
+  ARTIFACT_SKILL_DESCRIPTION,
+  ARTIFACT_SKILL_NAME,
+  ARTIFACT_SKILL_SOURCE,
+  ARTIFACT_SKILL_WHEN_TO_USE,
+} from './skill.ts'
 import { join, dirname, resolve } from 'node:path'
 import { mkdirSync, writeFileSync } from 'node:fs'
 
@@ -624,6 +635,24 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   })
 
+  // The conditional half of the tool's guidance, as a lazily-loaded skill.
+  //
+  // OPTIONAL on purpose: `skills` is not in this plugin's `inject` list, so a
+  // profile without the skill registry still loads the plugin and the tool
+  // works — only the extra guidance is unavailable. Declaring `skills` as a
+  // required injection instead would make the ENTIRE artifact feature fail to
+  // mount in any profile lacking it, which is a far worse failure than a
+  // missing optional instruction.
+  ctx.inject(['skills'], (skillCtx) => {
+    skillCtx.skills.register({
+      name: ARTIFACT_SKILL_NAME,
+      description: ARTIFACT_SKILL_DESCRIPTION,
+      whenToUse: ARTIFACT_SKILL_WHEN_TO_USE,
+      source: ARTIFACT_SKILL_SOURCE,
+      content: ARTIFACT_SKILL_BODY,
+    })
+  })
+
   ctx.tools.register(defineTool({
     name: 'artifact',
     description:
@@ -644,23 +673,12 @@ export function apply(ctx: Context, config: Config = {}): void {
       + 'this tool). The store never sees such edits, the GUI never updates, and the next artifact op overwrites '
       + 'them wholesale. EVERY mutation — however small — MUST go through this tool (patch/save/revert). Tell the '
       + 'user this path when they ask where an artifact lives. '
-      + 'FINAL-DELIVERABLE ASSERTION: a successful `create`, `save` or final `patch` renders the artifact live in the GUI — '
-      + 'that rendering IS the answer to the user, not a summary of it. After finishing an artifact, do NOT write '
-      + 'explanatory prose describing what you made; end the turn with at most a single short closing line (or nothing) '
-      + 'unless the user explicitly asked for an explanation. Only `read`/`list` results (which return source text) '
-      + 'may warrant a brief prose response. '
-      + 'INTERACTION-DATA PROTOCOL: when the artifact has internal state the user will interact with (game score, '
-      + 'counters, selections, results), expose it as `window.__dshArtifactData = { ... }` — a JSON value the artifact '
-      + 'updates as the state changes. Decide AT CREATE TIME whether interaction data matters: pass `interactive: true` '
-      + 'when you genuinely need to receive the user\'s data back (the canvas then shows a 提交交互 button); omit it for '
-      + 'purely presentational artifacts so no unnecessary button shows. Toggle it any time later with the `interactive` op. '
-      + 'SUBMISSION IS EXPLICIT — data reaches you ONLY through three deliberate user actions: (1) the user clicks the '
-      + 'canvas header\'s 提交交互 button; (2) the user clicks an in-page element YOU marked with `data-artifact-submit` '
-      + '(add that attribute only to real submit-style controls, e.g. a "提交答案/保存成绩" button); (3) a real <form> in '
-      + 'the page submits (navigation is auto-suppressed, so plain forms work). EVERY OTHER control — game buttons, '
-      + 'on-screen direction pads, keyboard/arrow-key handlers, sliders, tabs, ordinary links — NEVER submits regardless '
-      + 'of how often it is used: design on-page controls freely and reserve `data-artifact-submit` for the exact points '
-      + 'that mean "send my data to the AI".',
+      // The interaction-data protocol and the after-render delivery rule are
+      // CONDITIONAL: they matter only for an interactive artifact, or right
+      // after one renders. They live in the `html-artifact` SKILL (src/skill.ts)
+      // so they cost prompt tokens only when loaded — see that module for the
+      // split rule. This description keeps only what is needed to CALL the tool.
+      + `For interaction data and post-render delivery, load the \`${ARTIFACT_SKILL_NAME}\` skill.`,
     parameters: {
       op: {
         type: 'string', required: true,
