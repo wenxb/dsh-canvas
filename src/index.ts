@@ -28,6 +28,7 @@ import type {} from '@deepseek-ai/dsh-commands'
 // without the skill registry still loads this plugin).
 import type {} from '@deepseek-ai/dsh-skill'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { artifactNoticeSource } from './message-source.ts'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 type JsonValue = string | number | boolean | null | { [key: string]: JsonValue } | JsonValue[]
@@ -617,10 +618,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       const message = createUserMessage({
         content: [{ type: 'text', text: renderInteractionSubmission(parsed.value) }],
         source: {
-          kind: 'plugin',
-          plugin: name,
-          form: 'notice',
-          summary: renderSubmissionSummary(parsed.value),
+          ...artifactNoticeSource(renderSubmissionSummary(parsed.value)),
         },
       })
       invocation.agent.followup(message)
@@ -707,10 +705,7 @@ export function apply(ctx: Context, config: Config = {}): void {
                 + `后续修改请使用 ${id}。`,
             }],
             source: {
-              kind: 'plugin',
-              plugin: name,
-              form: 'notice',
-              summary: `导入 artifact ${request.artifactId} → ${id}`,
+              ...artifactNoticeSource(`导入 ${request.artifactId} → ${id}（来自 ${request.sessionId}）`),
             },
           }))
         }
