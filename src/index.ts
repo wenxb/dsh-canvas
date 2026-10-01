@@ -33,10 +33,11 @@ import {
   renderInteractionSubmission,
   renderSubmissionSummary,
 } from './interaction.ts'
-import { ArtifactStore, rebuildFromMetas, truncateHtml, type ArtifactMetaLike } from './registry.ts'
+import { ArtifactStore, UnknownVersionError, rebuildFromMetas, truncateHtml, type ArtifactMetaLike } from './registry.ts'
 import { DEFAULT_PERSIST_ROOT, makePersister, persistDirFor, type ArtifactPersistence } from './persistence.ts'
 import { LIBRARY_MAX_ARTIFACTS, librarySessionIds, readLibraryArtifact, scanLibrary } from './library.ts'
-import { join } from 'node:path'
+import { join, dirname, resolve } from 'node:path'
+import { mkdirSync, writeFileSync } from 'node:fs'
 
 /** Cordis plugin name. */
 export const name = 'dsh-html-artifact'
@@ -73,9 +74,18 @@ export const Config = z.object({
 })
 
 /** The tool's op vocabulary, one per lifecycle stage. */
-type ArtifactOp = 'create' | 'patch' | 'save' | 'revert' | 'interactive' | 'read' | 'destroy' | 'list' | 'library' | 'history' | 'import'
+type ArtifactOp = 'create' | 'patch' | 'save' | 'revert' | 'interactive' | 'read' | 'destroy' | 'list' | 'library' | 'history' | 'import' | 'export'
 
-const ARTIFACT_OPS: readonly ArtifactOp[] = ['create', 'patch', 'save', 'revert', 'interactive', 'read', 'destroy', 'list', 'library', 'history', 'import']
+/**
+ * The ONE op list. Every other surface that enumerates ops — the tool's input
+ * enum, its output enum, and the presentation switch — MUST derive from this,
+ * never re-type the list. They previously drifted: `library`/`history`/`import`
+ * were added to the handler and the output schema but NOT to the input enum,
+ * which silently made the whole cross-session feature uncallable by the model
+ * (an unknown enum member is rejected before `execute` ever runs). The
+ * `contracts.spec.ts` test now pins them together.
+ */
+export const ARTIFACT_OPS: readonly ArtifactOp[] = ['create', 'patch', 'save', 'revert', 'interactive', 'read', 'destroy', 'list', 'library', 'history', 'import', 'export']
 
 interface CreateArgs { op: 'create'; title?: string; html?: string; interactive?: boolean }
 interface PatchArgs { op: 'patch'; id: string; old_string: string; new_string: string; replace_all?: boolean }
@@ -85,8 +95,9 @@ interface InteractiveArgs { op: 'interactive'; id: string; value: boolean }
 interface ReadArgs { op: 'read'; id: string }
 interface DestroyArgs { op: 'destroy'; id: string }
 interface ListArgs { op: 'list' }
+interface ExportArgs { op: 'export'; id: string; path?: string; version?: number }
 
-type ArtifactArgs = CreateArgs | PatchArgs | SaveArgs | RevertArgs | InteractiveArgs | ReadArgs | DestroyArgs | ListArgs
+type ArtifactArgs = CreateArgs | PatchArgs | SaveArgs | RevertArgs | InteractiveArgs | ReadArgs | DestroyArgs | ListArgs | ExportArgs
 
 /** Canonical per-op output values (the loose output schema's valid subsets). */
 interface CreateValue { op: 'create'; id: string; version: number; title?: string; html: string; interactive?: boolean; path?: string }
@@ -134,7 +145,18 @@ interface ImportValue {
   origin: string
 }
 
-type ArtifactValue = CreateValue | PatchValue | SaveValue | RevertValue | InteractiveValue | ReadValue | DestroyValue | ListValue | LibraryValue | HistoryValue | ImportValue
+/** A standalone HTML file written into the workspace. */
+interface ExportValue {
+  op: 'export'
+  id: string
+  version: number
+  title?: string
+  /** Absolute path of the written file. */
+  path: string
+  bytes: number
+}
+
+type ArtifactValue = CreateValue | PatchValue | SaveValue | RevertValue | InteractiveValue | ReadValue | DestroyValue | ListValue | LibraryValue | HistoryValue | ImportValue | ExportValue
 
 function isArtifactValue(value: unknown): value is ArtifactValue {
   if (value === null || typeof value !== 'object') return false
@@ -214,6 +236,50 @@ function sessionIdOf(agent: Agent): string | undefined {
   const candidate = (agent.session as unknown as { id?: unknown } | undefined)?.id
     ?? (agent as unknown as { sessionId?: unknown }).sessionId
   return typeof candidate === 'string' && candidate !== '' ? candidate : undefined
+}
+
+/** The owning session's validated absolute cwd, probed defensively. */
+function cwdOf(agent: Agent): string | undefined {
+  const session = agent.session as unknown as { header?: { cwd?: unknown }; meta?: { cwd?: unknown }; cwd?: unknown } | undefined
+  const candidate = session?.header?.cwd ?? session?.meta?.cwd ?? session?.cwd
+  return typeof candidate === 'string' && candidate !== '' ? candidate : undefined
+}
+
+/** Characters that are never safe in a filename on the platforms DSH runs on. */
+const UNSAFE_FILENAME = /[<>:"/\\|?*\u0000-\u001f]/g
+
+/**
+ * Build the default export filename stem from an artifact's title.
+ *
+ * Titles are user prose and often CJK. An earlier version of this translated
+ * the title to ASCII, which turned `鹈鹕骑自行车 · SVG 动画` into just `SVG` — a
+ * name that identifies nothing. Non-ASCII letters are legal in filenames on
+ * every platform DSH runs on, so they are KEPT and only genuinely unsafe
+ * characters (path separators, control codes, Windows-reserved punctuation) are
+ * removed. A title yielding no letters or digits at all falls back to the
+ * artifact id, which is stable and greppable back to `list`/`read`.
+ * @param title - the artifact's display title, when it has one.
+ * @param id - the artifact id, used as the fallback stem.
+ * @param version - the exported version, appended when a version was named.
+ * @returns a filename stem with no extension or path separators.
+ */
+export function exportFileName(title: string | undefined, id: string, version: number | undefined): string {
+  const base = slugifyTitle(title) || id
+  return version === undefined ? base : `${base}-v${version}`
+}
+
+/** Filename-safe stem from a title, or '' when it carries no letters/digits. */
+export function slugifyTitle(title: string | undefined): string {
+  if (title === undefined) return ''
+  const slug = title
+    .replace(UNSAFE_FILENAME, ' ')
+    .trim()
+    .replace(/[\s_]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[-.]+|[-.]+$/g, '')
+  // Require a real letter or digit (Unicode-aware), so a title of only
+  // punctuation or separators is not mistaken for a name.
+  return /[\p{L}\p{N}]/u.test(slug) ? slug.slice(0, 80) : ''
 }
 
 function storeFor(agent: Agent | undefined, persistRoot: string | undefined): ArtifactStore {
@@ -348,6 +414,41 @@ function ensureFromLog(agent: Agent, store: ArtifactStore, id: string | undefine
 }
 
 /** Register the `artifact` tool. */
+/**
+ * The pending-call card for one `artifact` invocation.
+ *
+ * The artifact card is result-only: a running call has no id/html to draw, so
+ * every pending state is a plain generic card chosen BY OP. Titles are
+ * user-facing → Chinese.
+ *
+ * EXTRACTED FROM THE TOOL DEFINITION so a test can assert every op in
+ * {@link ARTIFACT_OPS} has a card: an op missing here renders no pending card
+ * at all, which is exactly the class of drift that made `library`/`history`/
+ * `import` uncallable. The `switch` deliberately has no `default` fallback that
+ * hides the gap — a new op must be added here.
+ * @param args - the raw tool arguments.
+ * @returns the generic card, or undefined for a non-artifact shape.
+ */
+export function presentCallForArtifact(args: unknown): { card: 'generic'; title: string; kind: 'read' | 'edit' | 'delete' | 'other'; rawInput?: unknown } | undefined {
+  const record = (args ?? {}) as Record<string, unknown>
+  const id = record.id
+  switch (record.op) {
+    case 'create': return { card: 'generic', title: '创建 HTML artifact', kind: 'other' }
+    case 'patch': return { card: 'generic', title: `修改 artifact ${String(id)}`, kind: 'edit', rawInput: record.old_string }
+    case 'save': return { card: 'generic', title: `保存版本 ${String(id)}`, kind: 'other' }
+    case 'revert': return { card: 'generic', title: `回退 artifact ${String(id)} 到 版本 ${String(record.version ?? '')}`, kind: 'other' }
+    case 'interactive': return { card: 'generic', title: `更新交互开关 artifact ${String(id)}`, kind: 'other' }
+    case 'read': return { card: 'generic', title: `读取 artifact ${String(id)}`, kind: 'read' }
+    case 'destroy': return { card: 'generic', title: `删除 artifact ${String(id)}`, kind: 'delete' }
+    case 'list': return { card: 'generic', title: '列出 HTML artifacts', kind: 'read' }
+    case 'library': return { card: 'generic', title: '浏览其他会话的 artifact 库', kind: 'read' }
+    case 'history': return { card: 'generic', title: `查看 ${String(record.session_id ?? '')}/${String(record.artifact_id ?? '')} 的版本`, kind: 'read' }
+    case 'import': return { card: 'generic', title: `导入 ${String(record.session_id ?? '')}/${String(record.artifact_id ?? '')}`, kind: 'other' }
+    case 'export': return { card: 'generic', title: `导出 artifact ${String(id)} 为独立 HTML 文件`, kind: 'read' }
+    default: return undefined
+  }
+}
+
 export function apply(ctx: Context, config: Config = {}): void {
   // Session GC DISABLED. The old behavior purged every artifact directory
   // whose session id was absent from the sessionPersistence index — but that
@@ -563,8 +664,11 @@ export function apply(ctx: Context, config: Config = {}): void {
     parameters: {
       op: {
         type: 'string', required: true,
-        enum: ['create', 'patch', 'save', 'revert', 'interactive', 'read', 'destroy', 'list'],
-        description: 'The operation: create | patch | save | revert | interactive | read | destroy | list.',
+        enum: [...ARTIFACT_OPS],
+        description: 'The operation: create | patch | save | revert | interactive | read | destroy | list | library | history | import | export. '
+          + 'library/history/import read artifacts persisted by OTHER sessions: library lists them (metadata only, no HTML), '
+          + 'history lists ONE artifact\'s saved versions, and import copies a chosen artifact INTO this session as a NEW artifact. '
+          + 'export writes the artifact out as a standalone .html file in the workspace.',
       },
       title: { type: 'string', description: 'create: optional display title for the artifact.' },
       interactive: { type: 'boolean', description: 'create: true when you need the user\'s interaction data back (canvas shows 提交交互; in-page data reaches you ONLY via the 提交交互 button, [data-artifact-submit] element clicks, or real form submits — ordinary controls never submit). Omit for presentational artifacts.' },
@@ -574,7 +678,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       old_string: { type: 'string', description: 'patch: the exact substring to find in the artifact\'s HTML source.' },
       new_string: { type: 'string', description: 'patch: the replacement text.' },
       replace_all: { type: 'boolean', description: 'patch: replace every occurrence instead of only the first (default false).' },
-      version: { type: 'number', description: 'revert: the saved version number to restore (see earlier save results).' },
+      version: { type: 'number', description: 'revert: the saved version number to restore (see earlier save results). export: the saved version to write out; omit for the current working copy.' },
+      path: { type: 'string', description: 'export: destination file path (absolute, or relative to the session cwd). Omit for a generated name in the workspace.' },
       session_id: { type: 'string', description: 'library/history/import: the SOURCE session id, as `library` reports it (the on-disk directory name).' },
       artifact_id: { type: 'string', description: 'history/import: the SOURCE artifact id within that session, as `library` reports it.' },
       all_versions: { type: 'boolean', description: 'import: also carry over every saved version of the source artifact (default false = working copy only).' },
@@ -585,7 +690,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         type: 'object',
         additionalProperties: false,
         properties: {
-          op: { type: 'string', required: true, enum: ['create', 'patch', 'save', 'revert', 'interactive', 'read', 'destroy', 'list', 'library', 'history', 'import'] },
+          op: { type: 'string', required: true, enum: [...ARTIFACT_OPS] },
           id: { type: 'string' },
           version: { type: 'integer' },
           title: { type: 'string' },
@@ -598,6 +703,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           path: { type: 'string' },
           dir: { type: 'string' },
           origin: { type: 'string' },
+          bytes: { type: 'integer' },
           sessions: {
             type: 'array',
             items: {
@@ -730,6 +836,13 @@ export function apply(ctx: Context, config: Config = {}): void {
                 + ' It is now a normal artifact of THIS session: patch/save/revert/read all work on it, and the source session is untouched.'
                 + ' The live preview updated in place — this rendering IS the deliverable, do not write prose describing it in your reply.',
             }]
+          case 'export':
+            return [{
+              type: 'text',
+              text: `Exported artifact ${value.id} (版本 ${value.version}, ${value.bytes} bytes) to ${value.path}.`
+                + ' This is a standalone .html file the user can open, share or archive outside DSH; it is a COPY,'
+                + ' so later edits to the artifact do NOT update it — re-export to refresh it.',
+            }]
         }
       },
       presentationMeta: (_args, value): JsonValue => {
@@ -768,6 +881,12 @@ export function apply(ctx: Context, config: Config = {}): void {
           // event for the model's own reading.
           case 'library':
           case 'history':
+            return { op: 'list', artifacts: [] }
+          // `export` changes NO artifact state — it reads one and writes a file
+          // elsewhere. Projecting it as a previewable op would make the canvas
+          // adopt it as this session's artifact and jump the user's selection,
+          // so it projects the same inert `list` card as the other read-only ops.
+          case 'export':
             return { op: 'list', artifacts: [] }
         }
       },
@@ -848,6 +967,43 @@ export function apply(ctx: Context, config: Config = {}): void {
           const id = requireString(args as Record<string, unknown>, 'id', 'destroy')
           store.destroy(id)
           return Promise.resolve({ op: 'destroy', id, removed: true as const })
+        }
+        case 'export': {
+          // `export` writes a STANDALONE .html file the user can open, mail or
+          // keep outside DSH — the counterpart to `import`. It is a pure READ of
+          // the store (nothing about the artifact changes) plus one file write.
+          //
+          // Source selection mirrors `revert`: `version` picks a frozen saved
+          // version; omitting it exports the WORKING COPY (what the canvas shows).
+          const raw = args as Record<string, unknown>
+          const id = requireString(raw, 'id', 'export')
+          const version = raw.version
+          if (version !== undefined && (typeof version !== 'number' || !Number.isInteger(version) || version < 1)) {
+            throw new Error('artifact export: `version` must be a positive integer (or omitted for the working copy)')
+          }
+          const state = store.get(id)
+          let html = state.html
+          if (typeof version === 'number') {
+            const found = store.versionsOf(id).find(entry => entry.version === version)
+            if (found === undefined) throw new UnknownVersionError(id, version)
+            html = found.html
+          }
+          // Destination: an explicit `path`, else a readable name in the
+          // workspace. The title is slugified because it is user prose and often
+          // CJK — CJK has no safe filename form, so those become the artifact id
+          // rather than a pile of underscores.
+          const cwd = exec.agent !== undefined ? cwdOf(exec.agent) : undefined
+          const explicit = typeof raw.path === 'string' && raw.path.trim() !== '' ? raw.path.trim() : undefined
+          const destination = explicit !== undefined
+            ? resolve(cwd ?? process.cwd(), explicit)
+            : join(cwd ?? process.cwd(), `${exportFileName(state.title, id, version)}.html`)
+          mkdirSync(dirname(destination), { recursive: true })
+          writeFileSync(destination, html, 'utf-8')
+          return Promise.resolve({
+            op: 'export', id, version: typeof version === 'number' ? version : state.version,
+            path: destination, bytes: bytesOf(html),
+            ...state.title === undefined ? {} : { title: state.title },
+          })
         }
         case 'list': {
           const dir = exec.agent !== undefined && persistRoot !== '' ? persistDirFor(persistRoot, sessionIdOf(exec.agent) ?? 'unknown') : undefined
@@ -961,26 +1117,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
     },
     presentCall(args) {
-      // The artifact card is result-only: a running call has no id/html to
-      // draw, so every pending state is a plain generic card by op. Titles
-      // are user-facing → Chinese.
-      const record = args as Record<string, unknown>
-      const op = record.op
-      const id = record.id
-      switch (op) {
-        case 'create': return { card: 'generic', title: '创建 HTML artifact', kind: 'other' }
-        case 'patch': return { card: 'generic', title: `修改 artifact ${String(id)}`, kind: 'edit', rawInput: record.old_string }
-        case 'save': return { card: 'generic', title: `保存版本 ${String(id)}`, kind: 'other' }
-        case 'revert': return { card: 'generic', title: `回退 artifact ${String(id)} 到 版本 ${String(record.version ?? '')}`, kind: 'other' }
-        case 'interactive': return { card: 'generic', title: `更新交互开关 artifact ${String(id)}`, kind: 'other' }
-        case 'read': return { card: 'generic', title: `读取 artifact ${String(id)}`, kind: 'read' }
-        case 'destroy': return { card: 'generic', title: `删除 artifact ${String(id)}`, kind: 'delete' }
-        case 'list': return { card: 'generic', title: '列出 HTML artifacts', kind: 'read' }
-        case 'library': return { card: 'generic', title: '浏览其他会话的 artifact 库', kind: 'read' }
-        case 'history': return { card: 'generic', title: `查看 ${String(record.session_id ?? '')}/${String(record.artifact_id ?? '')} 的版本`, kind: 'read' }
-        case 'import': return { card: 'generic', title: `导入 ${String(record.session_id ?? '')}/${String(record.artifact_id ?? '')}`, kind: 'other' }
-        default: return undefined
-      }
+      return presentCallForArtifact(args)
     },
     // NO `presentResult`. This was ~55 lines building a tagged `card: 'artifact'`
     // view that nothing consumed: it is the browser half that renders the card,
