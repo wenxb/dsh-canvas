@@ -283,7 +283,7 @@ export function makeArtifactId(existing: ReadonlySet<string>): string {
   throw new Error('artifact: could not allocate a unique id')
 }
 
-import type { ArtifactPersistence, PersistedArtifact } from './persistence.ts'
+import type { ArtifactPersistence } from './persistence.ts'
 
 /** The per-session artifact registry. One instance per owning agent; the tool
  *  plugin keys a WeakMap by the executing Agent. An optional {@link ArtifactPersistence}
@@ -304,19 +304,20 @@ export class ArtifactStore {
   create(html: string, title: string | undefined, maxBytes: number, interactive?: boolean): string {
     if (byteLength(html) > maxBytes) throw new ArtifactTooLargeError(maxBytes)
     const id = makeArtifactId(new Set(this.states.keys()))
+    const versions = [{ version: 1, html, time: Date.now() }]
     this.states.set(id, {
       html,
       ...title === undefined ? {} : { title },
       ...interactive === undefined ? {} : { interactive },
-      versions: [{ version: 1, html, time: Date.now() }],
+      versions,
     })
-    this.persist(id)
+    this.writeCreated(id, versions)
     return id
   }
 
   /**
    * Toggle whether user interaction data is expected for this artifact
-   * (drives the canvas's 提交交互 button).
+   * (drives the canvas's 提交交互 button). Only the manifest changes.
    * @param id - the artifact.
    * @param value - true = show the submit-interaction affordance.
    * @returns the updated state.
@@ -324,7 +325,7 @@ export class ArtifactStore {
   setInteractive(id: string, value: boolean): ArtifactState {
     const internal = this.internal(id)
     internal.interactive = value
-    this.persist(id)
+    this.writeMetadata(id)
     return this.stateOf(internal)
   }
 
@@ -349,7 +350,7 @@ export class ArtifactStore {
     }
     if (byteLength(outcome.html) > maxBytes) throw new ArtifactTooLargeError(maxBytes)
     internal.html = outcome.html
-    this.persist(id)
+    this.writeWorkingCopy(id)
     return { state: this.stateOf(internal), count: outcome.count }
   }
 
@@ -368,7 +369,13 @@ export class ArtifactStore {
     }
     internal.versions.push({ version: latest === undefined ? 1 : latest.version + 1, html: internal.html, time: Date.now() })
     while (internal.versions.length > MAX_VERSIONS) internal.versions.shift()
-    this.persist(id)
+    // A save freezes exactly ONE new version: write that file plus the manifest,
+    // not the whole history. Rewriting every version file was pure waste on the
+    // common path and got slower as the history grew.
+    const written = internal.versions[internal.versions.length - 1]
+    /* c8 ignore next -- `written` exists: we just pushed it. */
+    if (written !== undefined) this.writeVersion(id, written)
+    this.writeManifest(id)
     return { state: this.stateOf(internal), unchanged: false }
   }
 
@@ -384,7 +391,7 @@ export class ArtifactStore {
     const target = internal.versions.find(entry => entry.version === version)
     if (target === undefined) throw new UnknownVersionError(id, version)
     internal.html = target.html
-    this.persist(id)
+    this.writeWorkingCopy(id)
     return this.stateOf(internal)
   }
 
@@ -393,14 +400,39 @@ export class ArtifactStore {
     return [...this.internal(id).versions]
   }
 
-  /** Whether this store currently holds the artifact. */
+  /**
+   * Whether this store currently holds the artifact AT ALL — including a
+   * soft-deleted one.
+   *
+   * DELIBERATELY differs from "is live". The log-replay and disk-restore paths
+   * used to guard on this predicate to decide whether an artifact needed
+   * rebuilding, while `deleted` artifacts were reported as absent. Since a
+   * destroyed artifact is restored with `deleted: true` and then still reports
+   * absent, every replay restored it again and wrote its files to disk again —
+   * an unbounded loop of redundant work. Rebuild guards must ask "do I already
+   * have this?", and the answer for a tombstone is yes; asking "is it visible?"
+   * is {@link isLive}.
+   */
   has(id: string): boolean {
-    return this.states.get(id)?.deleted !== true && this.states.has(id)
+    return this.states.has(id)
+  }
+
+  /** Whether the artifact exists AND is visible to the model and the canvas. */
+  isLive(id: string): boolean {
+    const state = this.states.get(id)
+    return state !== undefined && state.deleted !== true
   }
 
   /**
-   * Restore an artifact reconstructed from the session log (server restarts
-   * lose the in-memory store; the log is the durable source of truth).
+   * Restore an artifact reconstructed from the durable session log or from the
+   * disk cache (server restarts lose the in-memory store; the log is the
+   * source of truth).
+   *
+   * WRITES NOTHING TO DISK: restoring is not a mutation, and the caller already
+   * holds whatever bytes this snapshot came from. The previous version ended in
+   * a full `persist()`, so merely OPENING an old session rewrote every artifact
+   * in it — twice, once for the disk-first boot and again for each log-replayed
+   * artifact. State is adopted verbatim, tombstones included.
    * @param id - the artifact id.
    * @param snapshot - the reconstructed state (html/title/interactive/versions).
    */
@@ -412,7 +444,6 @@ export class ArtifactStore {
       ...snapshot.deleted === true ? { deleted: true } : {},
       versions: [...snapshot.versions],
     })
-    this.persist(id)
   }
 
   /**
@@ -432,11 +463,12 @@ export class ArtifactStore {
     const internal = this.internal(id)
     internal.deleted = true
     // SOFT DELETE: files and persisted data STAY — recovery is possible
-    // (rebuildFromMetas replays the destroy meta to this same flag).
-    this.persist(id)
+    // (rebuildFromMetas replays the destroy meta to this same flag). Only the
+    // manifest records the tombstone; the bodies are untouched.
+    this.writeMetadata(id)
   }
 
-  /** Summaries of every artifact in this store, in creation order. */
+  /** Summaries of every visible artifact in this store, in creation order. */
   list(): ArtifactSummary[] {
     return [...this.states.entries()].filter(([, state]) => state.deleted !== true).map(([id, state]) => ({
       id,
@@ -446,20 +478,62 @@ export class ArtifactStore {
     }))
   }
 
-  /** Write the artifact's full snapshot through the disk seam (any fs
-   *  failure is contained inside the persister). */
-  private persist(id: string): void {
+  /**
+   * The exact juggling the persister is allowed to do. Each method writes the
+   * MINIMUM needed by its operation, because every extra `writeFileSync` is
+   * paid on the tool's hot path:
+   *  - `writeCreated`  — one version file + manifest (a fresh id has no other
+   *    files to touch);
+   *  - `writeWorkingCopy` — the working copy only;
+   *  - `writeVersion`  — one frozen version file;
+   *  - `writeMetadata` — the manifest only.
+   */
+  private persistenceApi(): NonNullable<ArtifactStore['persistence']> | undefined {
+    return this.persistence
+  }
+
+  private writeCreated(id: string, versions: readonly ArtifactVersion[]): void {
     const internal = this.states.get(id)
-    if (internal === undefined) return
-    const snapshot: PersistedArtifact = {
+    const api = this.persistenceApi()
+    if (internal === undefined || api === undefined) return
+    // All three: a fresh artifact has no working copy on disk yet, and
+    // `loadAll` reads `<id>.html` unconditionally — omit it and the artifact
+    // becomes invisible to the next boot even though its manifest is there.
+    api.writeWorkingCopy(id, internal.html)
+    for (const entry of versions) api.writeVersion(id, entry)
+    this.writeManifest(id)
+  }
+
+  private writeWorkingCopy(id: string): void {
+    const internal = this.states.get(id)
+    const api = this.persistenceApi()
+    if (internal === undefined || api === undefined) return
+    api.writeWorkingCopy(id, internal.html)
+  }
+
+  private writeVersion(id: string, version: ArtifactVersion): void {
+    this.persistenceApi()?.writeVersion(id, version)
+  }
+
+  private writeMetadata(id: string): void {
+    this.writeManifest(id)
+  }
+
+  /** The manifest is the artifact's full metadata (never its bodies). Byte
+   *  lengths are recorded because that is what a listing shows, and they are
+   *  known here without reading anything back from disk. */
+  private writeManifest(id: string): void {
+    const internal = this.states.get(id)
+    const api = this.persistenceApi()
+    if (internal === undefined || api === undefined) return
+    api.writeManifest({
       id,
-      html: internal.html,
       ...internal.title === undefined ? {} : { title: internal.title },
       ...internal.interactive === undefined ? {} : { interactive: internal.interactive },
       ...internal.deleted === true ? { deleted: true } : {},
-      versions: [...internal.versions],
-    }
-    this.persistence?.write(snapshot)
+      bytes: byteLength(internal.html),
+      versions: internal.versions.map(entry => ({ version: entry.version, time: entry.time, bytes: byteLength(entry.html) })),
+    })
   }
 
   private internal(id: string): InternalState {

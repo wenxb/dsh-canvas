@@ -3,7 +3,7 @@
  * full round-trip into a FRESH store (rebuilds working copy + versions).
  * Runs against a real tmp dir — the seam is fs-backed, so test the fs.
  */
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -79,16 +79,77 @@ describe('artifact disk persistence', () => {
     // Model-visible: not there anymore
     expect(() => first.store.get(id)).toThrow(/not found/)
     expect(first.store.list()).toEqual([])
-    expect(first.store.has(id)).toBe(false)
+    // `has` means "this store holds it", NOT "it is visible": the tombstone is
+    // present. That distinction is load-bearing — the replay/restore paths
+    // guard on `has` to decide whether to rebuild, and reporting a tombstone as
+    // absent made them rebuild (and, before restore stopped writing, rewrite)
+    // it on every replay. `isLive` is the visibility question.
+    expect(first.store.has(id)).toBe(true)
+    expect(first.store.isLive(id)).toBe(false)
     // Disk still has it; a fresh store booting from the SAME dir is opaque to it.
     const second = new ArtifactStore(makePersister(dir as string, 'session-1'))
     for (const snap of makePersister(dir as string, 'session-1').loadAll()) {
       second.restore(snap.id, { html: snap.html, ...snap.deleted === true ? { deleted: true } : {}, versions: snap.versions })
     }
-    expect(second.has(id)).toBe(false)
+    expect(second.has(id)).toBe(true)
+    expect(second.isLive(id)).toBe(false)
     expect(second.list()).toEqual([])
     // But the manifest still carries the deleted flag for manual repair:
     expect(JSON.parse(readFileSync(join(dir as string, 'session-1', `${id}.json`), 'utf-8')).deleted).toBe(true)
+  })
+
+  it('restoring writes NOTHING to disk (booting a session is read-only)', () => {
+    // The regression this pins: `restore()` ended in a full persist(), so
+    // merely opening an old session rewrote every artifact's working copy and
+    // every version file — twice, counting the log replay. Restoring is not a
+    // mutation and must not touch the filesystem at all.
+    const first = storeInTemp()
+    const id = first.store.create('<p>v1</p>', 'T', CAP)
+    first.store.patch(id, 'v1', 'v2', false, CAP)
+    first.store.save(id)
+    const snapshots = makePersister(dir as string, 'session-1').loadAll()
+    expect(snapshots).toHaveLength(1)
+
+    // Make any write immediately visible by mtime, then restore and compare.
+    const files = readdirSync(dir as string).sort()
+    const stampOf = (): string => files.map(f => `${f}@${statSync(join(dir as string, f)).mtimeMs}`).join('|')
+    const before = stampOf()
+    const second = new ArtifactStore(makePersister(dir as string, 'session-1'))
+    for (const snap of snapshots) second.restore(snap.id, snap)
+    expect(stampOf()).toBe(before)
+    // ...and the restored store is nonetheless fully usable.
+    expect(second.get(id).html).toBe('<p>v2</p>')
+    expect(second.versionsOf(id).map(v => v.version)).toEqual([1, 2])
+  })
+
+  it('patches only the working copy, saves only the new version file', () => {
+    // Writing the whole history on every mutation is the behavior this
+    // replaces: a patch rewrote every `<id>.vN.html`.
+    const { store, dir: d } = storeInTemp()
+    const id = store.create('<p>v1</p>', undefined, CAP)
+    // A save immediately after create is a genuine no-op (the working copy
+    // still equals v1, so no v2 is pushed) — make a real change first.
+    store.patch(id, 'v1', 'wip1', false, CAP)
+    store.save(id) // v2
+    const v1Before = statSync(join(d, `${id}.v1.html`)).mtimeMs
+    const v2Before = statSync(join(d, `${id}.v2.html`)).mtimeMs
+    store.patch(id, 'wip1', 'wip2', false, CAP)
+    expect(statSync(join(d, `${id}.v1.html`)).mtimeMs).toBe(v1Before)
+    expect(statSync(join(d, `${id}.v2.html`)).mtimeMs).toBe(v2Before)
+    store.save(id) // v3
+    const files = readdirSync(d).filter(f => f.endsWith('.html')).sort()
+    expect(files).toEqual([`${id}.html`, `${id}.v1.html`, `${id}.v2.html`, `${id}.v3.html`])
+    // The older version files were not rewritten by the save either.
+    expect(statSync(join(d, `${id}.v1.html`)).mtimeMs).toBe(v1Before)
+    expect(statSync(join(d, `${id}.v2.html`)).mtimeMs).toBe(v2Before)
+  })
+
+  it('records byte sizes in the manifest so a listing need not read bodies', () => {
+    const { store, dir: d } = storeInTemp()
+    const id = store.create('<p>12345</p>', undefined, CAP)
+    const manifest = JSON.parse(readFileSync(join(d, `${id}.json`), 'utf-8'))
+    expect(manifest.bytes).toBe(Buffer.byteLength('<p>12345</p>'))
+    expect(manifest.versions[0].bytes).toBe(Buffer.byteLength('<p>12345</p>'))
   })
 
   it('the session GC removes artifact dirs whose session is gone from persistence — keeps everything alive or archived', () => {

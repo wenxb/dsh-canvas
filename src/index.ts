@@ -202,6 +202,7 @@ function storeFor(agent: Agent | undefined, persistRoot: string | undefined): Ar
     // Disk-first boot: everything this session persisted (working copies AND
     // saved versions) is restored before any log replay — the log replay only
     // heals ids the disk cache lacks (e.g. after the directory was cleaned).
+    // `restore` deliberately writes nothing, so booting a session is read-only.
     if (persistence !== undefined) {
       for (const snapshot of persistence.loadAll()) {
         if (!store.has(snapshot.id)) {
@@ -209,6 +210,7 @@ function storeFor(agent: Agent | undefined, persistRoot: string | undefined): Ar
             html: snapshot.html,
             ...snapshot.title === undefined ? {} : { title: snapshot.title },
             ...snapshot.interactive === undefined ? {} : { interactive: snapshot.interactive },
+            deleted: snapshot.deleted === true,
             versions: snapshot.versions,
           })
         }
@@ -265,6 +267,10 @@ function ensureFromLog(agent: Agent, store: ArtifactStore, id: string | undefine
   }
   for (const [rebuiltId, snapshot] of rebuildFromMetas(metas)) {
     if (!all && rebuiltId !== id) continue
+    // `has` (not `isLive`): a soft-deleted artifact is ALREADY present as a
+    // tombstone, and re-restoring it would both overwrite that state and — in
+    // the old code, where every restore wrote to disk — rewrite its files on
+    // every single replay.
     if (!store.has(rebuiltId)) store.restore(rebuiltId, snapshot)
   }
   if (all && logLength >= 0) replayedThrough.set(agent, logLength)

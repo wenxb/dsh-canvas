@@ -4,8 +4,10 @@
  *
  * - `<id>.html`        — the current WORKING COPY (rewritten on every
  *   create/patch/save/revert);
- * - `<id>.json`        — the manifest: { id, title?, interactive?,
- *   versions: [{ version, time }] } (rewritten whenever metadata changes);
+ * - `<id>.json`        — the manifest: { id, title?, interactive?, deleted?,
+ *   bytes?, versions: [{ version, time, bytes? }] }. METADATA ONLY — it never
+ *   duplicates a body, and `bytes` lets a listing size an artifact without
+ *   reading any html;
  * - `<id>.v<N>.html`   — each saved version's frozen source (written on save).
  *
  * The in-memory ArtifactStore remains authoritative at runtime; this directory
@@ -15,7 +17,9 @@
  * store automatically — the model's next tool op overwrites them.
  *
  * All filesystem failures are reported to the console and otherwise ignored:
- * persistence must never break the tool's behavior.
+ * persistence must never break the tool's behavior. Each write is independent
+ * (rather than one try/catch around a multi-file sweep) so one unreadable file
+ * cannot cause the rest of an operation's writes to be skipped.
  * @module
  */
 import { mkdirSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
@@ -34,22 +38,39 @@ export interface PersistedArtifact {
   deleted?: boolean
 }
 
-/** The store-facing persistence seam (fs-backed by {@link makePersister}). */
+/** The store-facing persistence seam (fs-backed by {@link makePersister}).
+ *
+ * The operations are MINIMAL on purpose. An earlier seam exposed a single
+ * `write(snapshot)` that rewrote the working copy AND every version file AND
+ * the manifest on every mutation — so a single-character `patch` rewrote the
+ * entire version history, and `restore()` (called for every artifact on every
+ * session open) rewrote every artifact from scratch. Each method here writes
+ * exactly the file its operation changed.
+ */
 export interface ArtifactPersistence {
-  /** Write-through after every mutation of the artifact. */
-  write(snapshot: PersistedArtifact): void
+  /** Write the working copy (`<id>.html`) after a patch/revert. */
+  writeWorkingCopy(id: string, html: string): void
+  /** Write one frozen version body (`<id>.v<N>.html`). */
+  writeVersion(id: string, version: ArtifactVersion): void
+  /** Write the manifest (`<id>.json`) — metadata only, never a body. */
+  writeManifest(manifest: ArtifactManifest): void
   /** Delete every file belonging to one artifact. */
   remove(id: string): void
   /** Load every persisted artifact (missing/corrupt files are skipped). */
   loadAll(): PersistedArtifact[]
 }
 
-interface Manifest {
+/** The lightweight per-artifact manifest stored beside the bodies. Bodies are
+ *  NOT duplicated here: `versions` carries only the numbers and timestamps,
+ *  and `bytes` lets a listing report size without reading the html files. */
+export interface ArtifactManifest {
   id: string
   title?: string
   interactive?: boolean
   deleted?: boolean
-  versions: { version: number; time: number }[]
+  /** Total bytes of the working copy. */
+  bytes?: number
+  versions: { version: number; time: number; bytes?: number }[]
 }
 
 /** The default root: per-session directories under the DSH home. */
@@ -106,25 +127,30 @@ export function makePersister(root: string, sessionId: string): ArtifactPersiste
   const manifestPath = (id: string): string => join(dir, `${id}.json`)
   const versionPath = (id: string, version: number): string => join(dir, `${id}.v${version}.html`)
 
-  const write = (snapshot: PersistedArtifact): void => {
-    if (safeName(snapshot.id) === undefined) return
+  /** Every write is a lone `mkdirSync` + `writeFileSync`; a failure in one
+   *  artifact's write must not abandon the rest of an operation. */
+  const writeFile = (path: string, content: string): void => {
     try {
       mkdirSync(dir, { recursive: true })
-      writeFileSync(htmlPath(snapshot.id), snapshot.html, 'utf-8')
-      for (const entry of snapshot.versions) {
-        writeFileSync(versionPath(snapshot.id, entry.version), entry.html, 'utf-8')
-      }
-      const manifest: Manifest = {
-        id: snapshot.id,
-        ...snapshot.title === undefined ? {} : { title: snapshot.title },
-        ...snapshot.interactive === undefined ? {} : { interactive: snapshot.interactive },
-        ...snapshot.deleted === true ? { deleted: true } : {},
-        versions: snapshot.versions.map(entry => ({ version: entry.version, time: entry.time })),
-      }
-      writeFileSync(manifestPath(snapshot.id), JSON.stringify(manifest, null, 2), 'utf-8')
+      writeFileSync(path, content, 'utf-8')
     } catch (error) {
-      console.error('[dsh-html-artifact] persistence write failed:', error)
+      console.error(`[dsh-html-artifact] persistence write failed for ${path}:`, error)
     }
+  }
+
+  const writeWorkingCopy = (id: string, html: string): void => {
+    if (safeName(id) === undefined) return
+    writeFile(htmlPath(id), html)
+  }
+
+  const writeVersion = (id: string, version: ArtifactVersion): void => {
+    if (safeName(id) === undefined) return
+    writeFile(versionPath(id, version.version), version.html)
+  }
+
+  const writeManifest = (manifest: ArtifactManifest): void => {
+    if (safeName(manifest.id) === undefined) return
+    writeFile(manifestPath(manifest.id), JSON.stringify(manifest, null, 2))
   }
 
   const remove = (id: string): void => {
@@ -153,7 +179,7 @@ export function makePersister(root: string, sessionId: string): ArtifactPersiste
       const id = file.slice(0, -'.json'.length)
       if (safeName(id) === undefined) continue
       try {
-        const manifest = JSON.parse(readFileSync(join(dir, file), 'utf-8')) as Partial<Manifest>
+        const manifest = JSON.parse(readFileSync(join(dir, file), 'utf-8')) as Partial<ArtifactManifest>
         if (typeof manifest.id !== 'string' || !Array.isArray(manifest.versions)) continue
         const html = readFileSync(htmlPath(manifest.id), 'utf-8')
         const versions: ArtifactVersion[] = []
@@ -180,5 +206,5 @@ export function makePersister(root: string, sessionId: string): ArtifactPersiste
     return out
   }
 
-  return { write, remove, loadAll }
+  return { writeWorkingCopy, writeVersion, writeManifest, remove, loadAll }
 }
