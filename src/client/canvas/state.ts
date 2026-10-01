@@ -1515,10 +1515,34 @@ export function submitImport(
   sessionId: string,
   artifactId: string,
   versions: number[] | undefined,
+  includeWorking = true,
 ): Promise<boolean> {
-  return runCommand(`/artifact-import ${JSON.stringify({
+  return runCommand(formatImportCommand(sessionId, artifactId, versions, includeWorking))
+}
+
+/**
+ * Build the `/artifact-import` line. PURE and exported, like
+ * {@link formatSubmissionCommand}, so the payload it produces can be checked
+ * against the host's parser without a live session — the two producers and
+ * consumers of this JSON are in different modules and nothing else keeps them
+ * in agreement.
+ * @param sessionId - the SOURCE session.
+ * @param artifactId - the SOURCE artifact id.
+ * @param versions - selected saved versions, or undefined for the working copy.
+ * @param includeWorking - whether the source working copy travels too.
+ * @returns the command line.
+ */
+export function formatImportCommand(
+  sessionId: string,
+  artifactId: string,
+  versions: number[] | undefined,
+  includeWorking: boolean,
+): string {
+  return `/artifact-import ${JSON.stringify({
     sessionId,
     artifactId,
     ...versions === undefined || versions.length === 0 ? {} : { versions },
-  })}`)
+    // Only an explicit `false` travels; the host's default is the working copy.
+    ...includeWorking ? {} : { includeWorking: false },
+  })}`
 }

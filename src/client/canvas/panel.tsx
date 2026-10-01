@@ -167,6 +167,7 @@ function ImportPicker({ onClose }: { onClose: () => void }) {
       chosen.sessionId,
       chosen.artifact.artifactId,
       selection.length === 0 ? undefined : selection,
+      includeWorking,
     ).then(ok => {
       if (ok) {
         onClose()

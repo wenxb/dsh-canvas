@@ -14,7 +14,19 @@
  *    the kind of silent divergence that makes a picker untrustworthy.
  */
 import { describe, expect, it } from 'vitest'
-import { parseImportRequest, parseRevertRequest } from '../src/interaction.ts'
+import { parseImportRequest, parseRevertRequest, resolveImportContent } from '../src/interaction.ts'
+import { formatImportCommand } from '../src/client/canvas/state.ts'
+
+/**
+ * The parser takes the text AFTER the command name, while the builder produces
+ * the whole line, so the round trip strips the prefix — mirroring exactly what
+ * the host's command dispatcher does before calling the parser.
+ */
+function payloadOf(line: string): string {
+  const prefix = '/artifact-import '
+  expect(line.startsWith(prefix)).toBe(true)
+  return line.slice(prefix.length)
+}
 
 describe('parseImportRequest', () => {
   it('parses a minimal working-copy import and leaves `versions` absent', () => {
@@ -123,5 +135,98 @@ describe('parseRevertRequest', () => {
     const result = parseRevertRequest('nope')
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.error).toMatch(/^artifact-revert:/)
+  })
+})
+
+/*
+ * The pure selection resolver. `includeWorking` was added to the protocol
+ * because the picker's "当前内容（工作副本）" checkbox gated the import button but
+ * was otherwise ignored by the command — unchecking it changed nothing, since
+ * the host unconditionally used the source working copy as the imported
+ * artifact's content. A control that does not do what it says is worse than no
+ * control, so the semantics it now actually has are pinned here.
+ */
+describe('resolveImportContent', () => {
+  const snapshot = {
+    html: '<p>working</p>',
+    versions: [
+      { version: 1, html: '<p>one</p>', time: 100 },
+      { version: 2, html: '<p>two</p>', time: 200 },
+    ],
+  }
+
+  it('defaults to the working copy with no versions', () => {
+    const result = resolveImportContent(snapshot, undefined, true)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.html).toBe('<p>working</p>')
+    expect(result.versions).toEqual([])
+  })
+
+  it('carries the working copy alongside the selected versions', () => {
+    const result = resolveImportContent(snapshot, [1], true)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.html).toBe('<p>working</p>')
+    expect(result.versions.map(v => v.version)).toEqual([1])
+  })
+
+  it('substitutes the newest selected version when the working copy is excluded', () => {
+    const result = resolveImportContent(snapshot, [1, 2], false)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    // Version 2 is the newest selected, so it BECOMES the content — otherwise
+    // the import would have no bytes at all.
+    expect(result.html).toBe('<p>two</p>')
+    expect(result.versions.map(v => v.version)).toEqual([1, 2])
+  })
+
+  it('rejects excluding the working copy when nothing is selected', () => {
+    const result = resolveImportContent(snapshot, undefined, false)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error).toContain('nothing selected')
+    expect(resolveImportContent(snapshot, [], false).ok).toBe(false)
+  })
+
+  it('rejects a selection that matches no version', () => {
+    const result = resolveImportContent(snapshot, [9], true)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error).toContain('none of the requested versions')
+  })
+
+  it('sorts the selection ascending regardless of input order', () => {
+    const result = resolveImportContent(snapshot, [2, 1], true)
+    expect(result.ok && result.versions.map(v => v.version)).toEqual([1, 2])
+  })
+})
+
+/*
+ * `formatImportCommand` builds the exact line the picker sends. It is a second
+ * producer of the payload `parseImportRequest` consumes, and the two live in
+ * different modules (client canvas state vs. host interaction), so nothing but
+ * this test makes them agree — a rename on one side would silently fall back to
+ * the default and the checkbox would go dead again.
+ */
+describe('the picker command line round-trips through the parser', () => {
+  it('omits the flag when the working copy is wanted', () => {
+    const parsed = parseImportRequest(payloadOf(formatImportCommand('s-1', 'art-a', [2], true)))
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) return
+    expect(parsed.value.includeWorking).toBeUndefined()
+    expect(parsed.value.versions).toEqual([2])
+  })
+
+  it('carries an explicit false when the working copy is excluded', () => {
+    const parsed = parseImportRequest(payloadOf(formatImportCommand('s-1', 'art-a', [2], false)))
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) return
+    expect(parsed.value.includeWorking).toBe(false)
+    expect(parsed.value.versions).toEqual([2])
+  })
+
+  it('sends no versions array for a working-copy-only import', () => {
+    const line = formatImportCommand('s-1', 'art-a', undefined, true)
+    expect(line).not.toContain('versions')
+    expect(parseImportRequest(payloadOf(line)).ok).toBe(true)
   })
 })

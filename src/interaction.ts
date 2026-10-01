@@ -143,8 +143,66 @@ export interface ImportRequest {
    * artifact is ~2 MB and the picker's default must stay cheap.
    */
   versions?: number[]
+  /**
+   * Whether the SOURCE's working copy travels too. Defaults to TRUE, which is
+   * what an omitted `versions` already means; set FALSE to carry only the
+   * selected saved versions.
+   *
+   * This field exists because the picker has a "当前内容（工作副本）" checkbox
+   * and, without a way to express it, unchecking the box changed nothing: the
+   * host unconditionally used the source working copy as the imported
+   * artifact's content. A control that does not do what it says is worse than
+   * no control.
+   */
+  includeWorking?: boolean
   /** Optional display title to give the imported copy. */
   title?: string
+}
+
+/**
+ * Resolve which bytes the import should store, from the source snapshot and the
+ * user's selection. PURE, so the picker's semantics are testable without a
+ * session, a store, or a browser.
+ *
+ * The rules, which {@link ImportRequest} documents from the user's side:
+ *  - the imported artifact's content is the source WORKING COPY by default;
+ *  - with `includeWorking: false` it is the NEWEST SELECTED saved version —
+ *    that is the only reading of "don't bring the current content" that still
+ *    yields an artifact;
+ *  - selecting versions and keeping the working copy yields both, which is how
+ *    an unsaved edit stops being invisible.
+ * @param snapshot - the source artifact (working copy + saved versions).
+ * @param selectedVersions - the source version numbers the user picked.
+ * @param includeWorking - whether the source working copy is wanted.
+ * @returns the html and versions to store, or an error describing the conflict.
+ */
+export function resolveImportContent(
+  snapshot: { html: string; versions: readonly { version: number; html: string; time: number }[] },
+  selectedVersions: readonly number[] | undefined,
+  includeWorking: boolean,
+): { ok: true; html: string; versions: { version: number; html: string; time: number }[] }
+  | { ok: false; error: string } {
+  const wanted = selectedVersions === undefined ? [] : [...selectedVersions]
+  const selected = snapshot.versions
+    .filter(entry => wanted.includes(entry.version))
+    .sort((a, b) => a.version - b.version)
+  if (wanted.length > 0 && selected.length === 0) {
+    return { ok: false, error: `none of the requested versions exist in the source (it has ${snapshot.versions.length})` }
+  }
+  if (!includeWorking && selected.length === 0) {
+    // Nothing is selected AND the working copy is unwanted — there is no
+    // content left to import, so say so instead of silently importing one.
+    return { ok: false, error: 'nothing selected: the working copy is excluded and no version was chosen' }
+  }
+  const newest = selected[selected.length - 1]
+  return {
+    ok: true,
+    // Excluding the working copy means the newest selected version BECOMES the
+    // content. Storing it as such also keeps the store from inventing an extra
+    // version for a working copy the user explicitly declined.
+    html: includeWorking || newest === undefined ? snapshot.html : newest.html,
+    versions: selected,
+  }
 }
 
 export type ImportParseResult =
@@ -172,7 +230,7 @@ export function parseImportRequest(raw: string): ImportParseResult {
     return { ok: false, error: 'artifact-import: payload must be a JSON object' }
   }
   const record = payload as Record<string, unknown>
-  const { sessionId, artifactId, versions, title } = record
+  const { sessionId, artifactId, versions, title, includeWorking } = record
   if (typeof sessionId !== 'string' || sessionId.length === 0) {
     return { ok: false, error: 'artifact-import: "sessionId" must be a non-empty string' }
   }
@@ -195,12 +253,18 @@ export function parseImportRequest(raw: string): ImportParseResult {
     picked = [...new Set(versions as number[])].sort((a, b) => a - b)
     if (picked.length === 0) picked = undefined
   }
+  if (includeWorking !== undefined && typeof includeWorking !== 'boolean') {
+    return { ok: false, error: 'artifact-import: "includeWorking" must be a boolean' }
+  }
+  // Omit the default so the payload stays minimal and the host's own default
+  // (true) governs; only an explicit `false` needs to travel.
   return {
     ok: true,
     value: {
       sessionId,
       artifactId,
       ...picked === undefined ? {} : { versions: picked },
+      ...includeWorking === false ? { includeWorking: false } : {},
       ...typeof title === 'string' && title !== '' ? { title } : {},
     },
   }

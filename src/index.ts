@@ -31,13 +31,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 type JsonValue = string | number | boolean | null | { [key: string]: JsonValue } | JsonValue[]
-import {
-  parseImportRequest,
-  parseRevertRequest,
-  parseSubmissionPayload,
-  renderInteractionSubmission,
-  renderSubmissionSummary,
-} from './interaction.ts'
+import { parseImportRequest, parseRevertRequest, parseSubmissionPayload, renderInteractionSubmission, renderSubmissionSummary, resolveImportContent } from './interaction.ts'
 import { ArtifactStore, UnknownVersionError, rebuildFromMetas, truncateHtml, type ArtifactMetaLike } from './registry.ts'
 import { DEFAULT_PERSIST_ROOT, makePersister, persistDirFor, type ArtifactPersistence } from './persistence.ts'
 import { LIBRARY_MAX_ARTIFACTS, libraryListingPayload, librarySessionIds, libraryVersionsPayload, readLibraryArtifact, scanLibrary } from './library.ts'
@@ -725,24 +719,21 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
       try {
         const store = storeFor(agent, persistRoot)
-        const wanted = request.versions === undefined ? undefined : new Set(request.versions)
-        const sourceVersions = wanted === undefined
-          ? []
-          : snapshot.versions.filter(entry => wanted.has(entry.version))
-        if (wanted !== undefined && sourceVersions.length === 0) {
-          return {
-            kind: 'error',
-            text: `artifact-import: none of the requested versions exist in ${request.artifactId} (it has ${snapshot.versions.length})`,
-          }
+        // Which bytes to store is a pure decision (it has its own tests): the
+        // working copy by default, the newest selected version when the user
+        // unchecked 当前内容.
+        const resolved = resolveImportContent(snapshot, request.versions, request.includeWorking !== false)
+        if (!resolved.ok) {
+          return { kind: 'error', text: `artifact-import: ${resolved.error}` }
         }
         const title = request.title ?? snapshot.title
         const { id, versions } = store.importArtifact({
-          html: snapshot.html,
+          html: resolved.html,
           ...title === undefined ? {} : { title },
           ...snapshot.interactive === undefined ? {} : { interactive: snapshot.interactive },
-          versions: sourceVersions,
+          versions: resolved.versions,
           origin: { sessionId: request.sessionId, artifactId: request.artifactId },
-        }, maxArtifactBytes, { includeVersions: wanted !== undefined })
+        }, maxArtifactBytes, { includeVersions: resolved.versions.length > 0 })
         // Wake the model with the new identity, so it patches the RIGHT artifact.
         if (agent !== undefined) {
           agent.followup(createUserMessage({

@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { ArtifactStore } from '../src/registry.ts'
 import { makePersister } from '../src/persistence.ts'
 import { LIBRARY_MAX_ARTIFACTS, readLibraryArtifact, scanLibrary } from '../src/library.ts'
+import { resolveImportContent } from '../src/interaction.ts'
 
 let root: string | undefined
 
@@ -325,5 +326,65 @@ describe('import against an older manifest shape', () => {
     const snapshot = readLibraryArtifact(root, 'session-bad', 'art-bad')
     expect(snapshot?.origin).toBeUndefined()
     expect(readFileSync(join(dir, 'art-bad.json'), 'utf-8')).toContain('42')
+  })
+})
+/*
+ * The `includeWorking: false` path through the REAL store — the fix for the
+ * picker checkbox that changed nothing. The unit tests above pin the pure
+ * resolver; this proves the host stores the SELECTED version's bytes rather
+ * than the source working copy, and does not invent an extra version for a
+ * working copy the user explicitly declined.
+ *
+ * The fixture is the interesting shape on purpose: the source working copy is
+ * 'v3-wip', ahead of the newest saved version, so using it by mistake is
+ * visible rather than coincidentally identical.
+ */
+describe('importing a saved version without the working copy', () => {
+  it('stores the newest selected version as the content', () => {
+    const { root: sourceRoot, sourceStore, artifactId } = withSourceSession()
+    // `get()` returns the public state; the version bodies live behind
+    // `versionsOf()`, which is what the host command reads.
+    const snapshot = { html: sourceStore.get(artifactId).html, versions: sourceStore.versionsOf(artifactId) }
+    // The source working copy really is ahead, or this test proves nothing.
+    expect(snapshot.html).toContain('v3-wip')
+
+    const resolved = resolveImportContent(snapshot, [1], false)
+    expect(resolved.ok).toBe(true)
+    if (!resolved.ok) return
+    expect(resolved.html).toBe('<h1>v1</h1>')
+
+    const target = new ArtifactStore(makePersister(sourceRoot, 'session-target'))
+    const imported = target.importArtifact({
+      html: resolved.html,
+      versions: resolved.versions,
+    }, CAP, { includeVersions: resolved.versions.length > 0 })
+
+    const stored = target.get(imported.id)
+    const storedVersions = target.versionsOf(imported.id)
+    // NOT 'v3-wip': the declined working copy must not arrive anyway. This is
+    // the assertion that would have caught the dead checkbox.
+    expect(stored.html).toBe('<h1>v1</h1>')
+    // And no extra version was invented for it.
+    expect(storedVersions).toHaveLength(1)
+    expect(storedVersions[0]!.html).toBe('<h1>v1</h1>')
+  })
+
+  it('still carries the working copy when the flag is left on', () => {
+    const { root: sourceRoot, sourceStore, artifactId } = withSourceSession()
+    const snapshot = { html: sourceStore.get(artifactId).html, versions: sourceStore.versionsOf(artifactId) }
+    const resolved = resolveImportContent(snapshot, [1], true)
+    expect(resolved.ok).toBe(true)
+    if (!resolved.ok) return
+    expect(resolved.html).toContain('v3-wip')
+
+    const target = new ArtifactStore(makePersister(sourceRoot, 'session-target'))
+    const imported = target.importArtifact({
+      html: resolved.html,
+      versions: resolved.versions,
+    }, CAP, { includeVersions: resolved.versions.length > 0 })
+    const stored = target.get(imported.id)
+    expect(stored.html).toContain('v3-wip')
+    // v1 plus the working copy that trails it.
+    expect(target.versionsOf(imported.id).map(v => v.html)).toEqual(['<h1>v1</h1>', '<h1>v3-wip</h1>'])
   })
 })
