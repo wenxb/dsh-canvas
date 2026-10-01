@@ -86,7 +86,7 @@ function transcriptOf(snapshot: unknown): ConversationSnapshot {
   }
 }
 import { extractStreamingHtml, extractStreamingTitle, isStreamingCreate } from '../stream/extract.ts'
-import { buildTimelines, currentCheckpointIndex, scanArtifactEntries, scanPersistDir, type ArtifactEntry, type ArtifactTimeline } from './scan.ts'
+import { buildTimelines, currentCheckpointIndex, scanArtifactEntries, scanPersistDir, type ArtifactCheckpoint, type ArtifactEntry, type ArtifactTimeline } from './scan.ts'
 
 /** Settled version events newer than this are treated as live activity. */
 const VERSION_EVENT_WINDOW_MS = 15_000
@@ -189,14 +189,45 @@ function streamOfCall(call: RunningToolCall): StreamPreview | null {
   }
 }
 
+/**
+ * View state (panel open, which version is being browsed) is kept in
+ * localStorage, keyed per session.
+ *
+ * WHY localStorage, AND WHY THAT IS NOT A "PARALLEL MECHANISM": the review
+ * flagged this as duplicating harness session state, so it was checked against
+ * the client service surface (cordis_inspect_query → platform client, provider
+ * Service). The exposed services are layout, locale, sessions, slots, theme,
+ * timer, uiWorkspace and workspaces — none of them stores plugin-owned
+ * per-session view state, and the only per-session persistence the plugin
+ * itself owns is the artifacts DIRECTORY, which lives on the host. A plugin
+ * cannot write there from the client without adding an HTTP route, and this
+ * plugin deliberately has no client→host write channel. So localStorage is the
+ * only available client-side store.
+ *
+ * The accepted tradeoff: view state does not follow the user across browsers or
+ * devices, and clearing site data resets it. That is a cosmetic loss (which
+ * version was on screen), not data loss — the artifacts themselves are on disk
+ * and the canvas rebuilds every timeline from the session log.
+ *
+ * Shape is VERSIONED so a future change can migrate instead of throwing away
+ * every stored entry on the first mismatch.
+ */
 const UI_STORAGE_PREFIX = 'dsh-html-artifact:canvas-ui:'
-type PersistedUi = { open: boolean; viewIndex: number }
+/** Bumped when the persisted shape changes incompatibly; older entries are
+ *  discarded rather than misread. */
+const UI_STORAGE_VERSION = 1
+/** Stored entries are bounded: a long-lived profile accumulates one key per
+ *  session ever opened, and nothing else prunes them. */
+const UI_STORAGE_MAX_ENTRIES = 200
+type PersistedUi = { version: number; open: boolean; viewIndex: number; savedAt: number }
 
 function loadPersistedUi(sessionId: string): SessionUi {
+  const empty: SessionUi = { open: false, selectedId: undefined, viewIndex: -1 }
   try {
     const raw = globalThis.localStorage?.getItem(UI_STORAGE_PREFIX + sessionId)
-    if (raw == null) return { open: false, selectedId: undefined, viewIndex: -1 }
+    if (raw == null) return empty
     const parsed = JSON.parse(raw) as Partial<PersistedUi>
+    if (parsed.version !== UI_STORAGE_VERSION) return empty
     return {
       open: parsed.open === true,
       // selectedId is NOT restored: a page reload should reopen the canvas at
@@ -207,17 +238,45 @@ function loadPersistedUi(sessionId: string): SessionUi {
       viewIndex: typeof parsed.viewIndex === 'number' ? parsed.viewIndex : -1,
     }
   } catch {
-    return { open: false, selectedId: undefined, viewIndex: -1 }
+    return empty
   }
+}
+
+/** Drop the oldest entries once the prefix exceeds its budget. localStorage
+ *  has no per-prefix API, so this walks the key list — cheap at this size. */
+function prunePersistedUi(): void {
+  try {
+    const storage = globalThis.localStorage
+    if (storage === undefined) return
+    const keys: { key: string; savedAt: number }[] = []
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index)
+      if (key === null || !key.startsWith(UI_STORAGE_PREFIX)) continue
+      let savedAt = 0
+      try {
+        savedAt = (JSON.parse(storage.getItem(key) ?? '{}') as Partial<PersistedUi>).savedAt ?? 0
+      } catch { /* unreadable entry sorts oldest, so it is pruned first */ }
+      keys.push({ key, savedAt })
+    }
+    if (keys.length <= UI_STORAGE_MAX_ENTRIES) return
+    keys.sort((a, b) => a.savedAt - b.savedAt)
+    for (const { key } of keys.slice(0, keys.length - UI_STORAGE_MAX_ENTRIES)) storage.removeItem(key)
+  } catch { /* storage blocked — non-fatal */ }
 }
 
 function persistUi(sessionId: string, ui: SessionUi): void {
   try {
-    globalThis.localStorage?.setItem(UI_STORAGE_PREFIX + sessionId, JSON.stringify({
+    const storage = globalThis.localStorage
+    if (storage === undefined) return
+    const payload: PersistedUi = {
+      version: UI_STORAGE_VERSION,
       open: ui.open,
       // selectedId deliberately NOT persisted (see loadPersistedUi).
       viewIndex: ui.viewIndex,
-    }))
+      savedAt: Date.now(),
+    }
+    storage.setItem(UI_STORAGE_PREFIX + sessionId, JSON.stringify(payload))
+    prunePersistedUi()
   } catch { /* storage full / blocked — non-fatal */ }
 }
 
@@ -871,20 +930,21 @@ class CanvasBridge {
   private applyHostTimelines(): void {
     for (const [id, host] of this.hostTimelines) {
       const existing = this.timelinesValue.get(id)
-      // The host's full saved-version history becomes the checkpoint list; a
-      // lone newest version is the fallback when no history was reported.
-      const checkpoints = (host.versions !== undefined && host.versions.length > 0
+      // The host's full saved-version history, or a lone newest version as the
+      // fallback when no history was reported.
+      const hostCheckpoints = (host.versions !== undefined && host.versions.length > 0
         ? host.versions
         : host.savedVersion === undefined || host.html === undefined
           ? []
           : [{ version: host.savedVersion, html: host.html, time: 0 }]
       ).map(entry => ({ version: entry.version, html: entry.html, title: host.title, seq: 0, time: entry.time }))
+
       if (existing === undefined) {
         this.timelinesValue.set(id, {
           id,
           title: host.title,
           interactive: host.interactive,
-          checkpoints,
+          checkpoints: hostCheckpoints,
           workingHtml: host.html,
           workingDirty: false,
           destroyed: false,
@@ -893,13 +953,30 @@ class CanvasBridge {
         })
         continue
       }
-      if (existing.title === undefined && host.title !== undefined) existing.title = host.title
-      if (existing.interactive === undefined && host.interactive !== undefined) existing.interactive = host.interactive
-      if (existing.workingHtml === undefined && host.html !== undefined) existing.workingHtml = host.html
-      // A patch-only (truncated) window yields zero checkpoints: adopt the
-      // host history so the version badge, prev/next controls, revert and
-      // 下载 all operate on real versions instead of nothing.
-      if (existing.checkpoints.length === 0 && checkpoints.length > 0) existing.checkpoints = checkpoints
+
+      // MERGE, do not mutate. The host index covers artifacts the truncated
+      // conversation window lost, and it carries the FULL version history — the
+      // window scan only sees the ops still loaded. The previous rule adopted
+      // the host history only when the window produced ZERO checkpoints, so a
+      // long session that had scrolled past its early `save` ops showed an
+      // incomplete version list even though the host had sent every version
+      // (and the wire had already paid for all of them).
+      //
+      // The window is authoritative for VERSIONS IT SAW (it has real seq/time,
+      // which drive ordering and the "last updated" sort); the host fills in
+      // versions the window lacks. Keyed by version number.
+      const byVersion = new Map<number, ArtifactCheckpoint>()
+      for (const checkpoint of hostCheckpoints) byVersion.set(checkpoint.version, checkpoint)
+      for (const checkpoint of existing.checkpoints) byVersion.set(checkpoint.version, checkpoint)
+      const merged = [...byVersion.values()].sort((a, b) => a.version - b.version)
+
+      this.timelinesValue.set(id, {
+        ...existing,
+        title: existing.title ?? host.title,
+        interactive: existing.interactive ?? host.interactive,
+        workingHtml: existing.workingHtml ?? host.html,
+        checkpoints: merged,
+      })
     }
   }
 
@@ -958,6 +1035,19 @@ class CanvasBridge {
   private publish(): void {
     const state = this.ui()
     this.rev += 1
+    // IMMUTABLE SNAPSHOT. `getSnapshot` must return a value that changes
+    // identity exactly when the store changes — that is how
+    // useSyncExternalStore decides to re-render. The previous version reused a
+    // single `timelinesValue` Map reference and mutated it in place
+    // (applyHostTimelines wrote into existing entries), so a change that only
+    // altered a timeline's contents left the reference identical and React
+    // could skip the update entirely: the panel showed stale versions until
+    // something else happened to force a render.
+    //
+    // The maps are copied one level deep (entries are not cloned — they are
+    // treated as read-only by the UI, and cloning a 149 KB html per publish
+    // would be the real cost). `applyHostTimelines` below therefore REPLACES
+    // entries instead of mutating them.
     this.snapshotValue = {
       rev: this.rev,
       open: state.open,
@@ -967,7 +1057,7 @@ class CanvasBridge {
       reportedStream: this.reportedValue,
       runningStream: this.runningStreamValue,
       pending: this.pendingValue,
-      timelines: this.timelinesValue,
+      timelines: new Map(this.timelinesValue),
       persistDir: this.persistDirValue,
       order: this.orderValue,
     }

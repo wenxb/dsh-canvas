@@ -204,7 +204,7 @@ describe('canvas bridge cross-reload (per-session localStorage persistence)', ()
     // (tab / session) keep the selection — only F5 drops it.
     globalThis.localStorage?.setItem(
       'dsh-html-artifact:canvas-ui:s-reload',
-      JSON.stringify({ open: true, selectedId: 'art-old', viewIndex: 0 }),
+      JSON.stringify({ version: 1, open: true, selectedId: 'art-old', viewIndex: 0, savedAt: Date.now() }),
     )
     const current = { nodes: [], runningCalls: [] }
     const session = {
@@ -431,5 +431,169 @@ describe('canvas bridge truncated-window recovery (the host index)', () => {
     } finally {
       globalThis.fetch = original
     }
+  })
+})
+
+describe('persisted view state is versioned and bounded', () => {
+  /** Cold-boot the bridge against a seeded localStorage entry. */
+  const boot = (sessionId: string, seed?: string): boolean => {
+    if (seed === undefined) globalThis.localStorage?.removeItem(`dsh-html-artifact:canvas-ui:${sessionId}`)
+    else globalThis.localStorage?.setItem(`dsh-html-artifact:canvas-ui:${sessionId}`, seed)
+    const current = { nodes: [], runningCalls: [] }
+    const session = {
+      getSnapshot: () => current,
+      subscribe: () => () => {},
+      command: async (): Promise<{ ok: true; value: { matched: true } }> => ({ ok: true, value: { matched: true } }),
+    }
+    const sessions = {
+      list: { getSnapshot: () => ({ current: sessionId }), subscribe: () => () => {} },
+      binding: (_id: string) => ({ sessionId, session, ctx: {} }),
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    canvasBridge.init({ sessions, get: () => undefined } as any)
+    return canvasBridge.getSnapshot().open
+  }
+
+  it('ignores an entry written by an incompatible older shape', () => {
+    // No `version` field = the pre-versioning shape. It must be DISCARDED, not
+    // misread: silently honoring unknown fields is how a schema change becomes
+    // a corrupted restore.
+    expect(boot('s-v0', JSON.stringify({ open: true, viewIndex: 3 }))).toBe(false)
+  })
+
+  it('ignores an entry from a future version', () => {
+    expect(boot('s-v99', JSON.stringify({ version: 99, open: true, viewIndex: 0, savedAt: 1 }))).toBe(false)
+  })
+
+  it('honors a current-version entry', () => {
+    expect(boot('s-v1', JSON.stringify({ version: 1, open: true, viewIndex: 0, savedAt: Date.now() }))).toBe(true)
+  })
+
+  it('tolerates corrupt JSON', () => {
+    expect(boot('s-bad', '{not json')).toBe(false)
+  })
+
+  it('prunes the oldest entries once the prefix exceeds its budget', () => {
+    const store = globalThis.localStorage
+    expect(store).toBeDefined()
+    // Fill past the 200-entry budget with increasing timestamps, then touch one
+    // more via a fresh boot (which persists) and confirm the oldest are gone.
+    for (let i = 0; i < 205; i += 1) {
+      store?.setItem(
+        `dsh-html-artifact:canvas-ui:bulk-${i}`,
+        JSON.stringify({ version: 1, open: true, viewIndex: 0, savedAt: 1000 + i }),
+      )
+    }
+    boot('s-prune', JSON.stringify({ version: 1, open: true, viewIndex: 0, savedAt: Date.now() }))
+    const keys: string[] = []
+    for (let i = 0; i < (store?.length ?? 0); i += 1) {
+      const key = store?.key(i)
+      if (key?.startsWith('dsh-html-artifact:canvas-ui:')) keys.push(key)
+    }
+    expect(keys.length).toBeLessThanOrEqual(200)
+    // The oldest seeds were dropped...
+    expect(store?.getItem('dsh-html-artifact:canvas-ui:bulk-0')).toBeNull()
+    // ...and the newest survived.
+    expect(store?.getItem('dsh-html-artifact:canvas-ui:bulk-204')).not.toBeNull()
+  })
+})
+
+describe('host index merge (F1: host history was discarded)', () => {
+  /** Boot with a truncated window (no settled artifact cards) plus a stubbed
+   *  host index carrying the FULL version history. */
+  const bootWithHost = async (
+    sessionId: string,
+    hostArtifacts: unknown[],
+  ): Promise<void> => {
+    const current = { nodes: [], runningCalls: [] }
+    const session = {
+      getSnapshot: () => current,
+      subscribe: () => () => {},
+      command: async (): Promise<{ ok: true; value: { matched: true } }> => ({ ok: true, value: { matched: true } }),
+    }
+    const sessions = {
+      list: { getSnapshot: () => ({ current: sessionId }), subscribe: () => () => {} },
+      binding: (_id: string) => ({ sessionId, session, ctx: {} }),
+    }
+    const original = globalThis.fetch
+    globalThis.fetch = (async () => ({
+      ok: true,
+      json: async () => ({ ok: true, artifacts: hostArtifacts }),
+    })) as unknown as typeof fetch
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      canvasBridge.init({ sessions, get: () => undefined } as any)
+      // The real trigger is the canvas tab body mounting (CanvasTabContent
+      // calls ensureHostIndex on mount).
+      canvasBridge.ensureHostIndex()
+      // The index arrives on a microtask chain; let it settle.
+      await new Promise(resolve => setTimeout(resolve, 0))
+      await new Promise(resolve => setTimeout(resolve, 0))
+    } finally {
+      globalThis.fetch = original
+    }
+  }
+
+  it('adopts the host version list when the window has no checkpoints', async () => {
+    await bootWithHost('s-host-empty', [{
+      id: 'art-h1', title: '页面', savedVersion: 3, html: '<p>v3</p>',
+      versions: [
+        { version: 1, html: '<p>v1</p>', time: 10 },
+        { version: 2, html: '<p>v2</p>', time: 20 },
+        { version: 3, html: '<p>v3</p>', time: 30 },
+      ],
+    }])
+    const timeline = canvasBridge.getSnapshot().timelines.get('art-h1')
+    expect(timeline?.checkpoints.map(c => c.version)).toEqual([1, 2, 3])
+    expect(timeline?.title).toBe('页面')
+  })
+
+  it('MERGES the host history into a window that saw only LATER saves', async () => {
+    // The review's F1: a long session scrolls past its early `save` ops, so the
+    // window knows only v3 while the host knows v1..v3. The old rule adopted the
+    // host list only when the window had ZERO checkpoints, so v1/v2 were lost
+    // even though the wire had already delivered them.
+    const current = {
+      nodes: [
+        { kind: 'tool-result', seq: 90, time: 90, callId: 'c9', meta: { op: 'save', id: 'art-h2', version: 3, html: '<p>v3</p>', title: 'T' } },
+      ],
+      runningCalls: [],
+    }
+    const session = {
+      getSnapshot: () => current,
+      subscribe: () => () => {},
+      command: async (): Promise<{ ok: true; value: { matched: true } }> => ({ ok: true, value: { matched: true } }),
+    }
+    const sessions = {
+      list: { getSnapshot: () => ({ current: 's-host-merge' }), subscribe: () => () => {} },
+      binding: (_id: string) => ({ sessionId: 's-host-merge', session, ctx: {} }),
+    }
+    const original = globalThis.fetch
+    globalThis.fetch = (async () => ({
+      ok: true,
+      json: async () => ({
+        ok: true,
+        artifacts: [{
+          id: 'art-h2', title: 'T', savedVersion: 3, html: '<p>v3</p>',
+          versions: [
+            { version: 1, html: '<p>v1</p>', time: 10 },
+            { version: 2, html: '<p>v2</p>', time: 20 },
+            { version: 3, html: '<p>v3</p>', time: 30 },
+          ],
+        }],
+      }),
+    })) as unknown as typeof fetch
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      canvasBridge.init({ sessions, get: () => undefined } as any)
+      canvasBridge.ensureHostIndex()
+      await new Promise(resolve => setTimeout(resolve, 0))
+      await new Promise(resolve => setTimeout(resolve, 0))
+    } finally {
+      globalThis.fetch = original
+    }
+    const timeline = canvasBridge.getSnapshot().timelines.get('art-h2')
+    // ALL THREE versions are present — the window's v3 plus the host's v1/v2.
+    expect(timeline?.checkpoints.map(c => c.version)).toEqual([1, 2, 3])
   })
 })
