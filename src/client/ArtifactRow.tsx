@@ -26,6 +26,7 @@ export type ArtifactRowProps = Pick<ToolCallOwnerProps, 'callId' | 'toolName' | 
 import { artifactArgs, artifactCardModel, cardVersion } from './contract.ts'
 import { canvasBridge, useCanvasState } from './canvas/state.ts'
 import { extractStreamingHtml, extractStreamingTitle, isStreamingCreate } from './stream/extract.ts'
+import { hideFlowItemAround, revealFlowItemAround } from './chat-flow.ts'
 import { IconCheck, IconCode, IconCopy, IconOpen } from './icons.tsx'
 import css from './artifact.module.css'
 
@@ -84,39 +85,12 @@ function statusLine(view: Extract<ArtifactCardView, { html: string }>): string {
 
 /**
  * A settled call that intentionally draws NOTHING — and, crucially, collapses
- * the chat flow item around it. The host chat column is a flex list with a
- * fixed gap between items, so a mere `null` render leaves one empty flow item
- * per patch standing; a run of four patches used to strand an ~80px blank
- * band mid-conversation. Each tool call owns its flow item (verified against
- * the live DOM: callRows ↔ flowItems 1:1), so hiding the closest slot wrapper's
- * parent removes the gap entirely.
+ * the chat flow item around it so a run of hidden calls leaves no blank band.
+ * All the DOM knowledge lives in ../chat-flow.ts; this is just the mount hook.
  */
 export function HiddenRow() {
   const ref = useRef<HTMLDivElement | null>(null)
-  useEffect(() => {
-    const el = ref.current
-    if (!el) return
-    const callRow = el.closest<HTMLElement>('[data-chat-call-id]')
-    const prevCallDisplay = callRow?.style.display
-    if (callRow) {
-      callRow.style.display = 'none'
-    }
-    const flowItem = el.closest<HTMLElement>('[data-chat-flow-kind], [data-chat-flow-key]')
-      ?? (el.closest('[data-slot="conversation.chat.node"]')?.parentElement as HTMLElement | null)
-    let prevFlowDisplay: string | undefined
-    if (flowItem instanceof HTMLElement && (flowItem.dataset.chatFlowKind === 'artifact-draft' || flowItem.childElementCount === 1)) {
-      prevFlowDisplay = flowItem.style.display
-      flowItem.style.display = 'none'
-    }
-    return () => {
-      if (callRow && prevCallDisplay !== undefined) {
-        callRow.style.display = prevCallDisplay
-      }
-      if (flowItem instanceof HTMLElement && prevFlowDisplay !== undefined) {
-        flowItem.style.display = prevFlowDisplay
-      }
-    }
-  }, [])
+  useEffect(() => hideFlowItemAround(ref.current), [])
   return <div ref={ref} data-artifact-hidden="true" style={{ display: 'none' }} aria-hidden="true" />
 }
 
@@ -157,20 +131,10 @@ export function ArtifactRow(props: ArtifactRowProps) {
     }
   }, [props.callId])
 
+  // A row that becomes VISIBLE again (a running create settling into a real
+  // card) must undo a hide another state of this same row performed.
   const rowRef = useRef<HTMLDivElement | null>(null)
-  useEffect(() => {
-    const el = rowRef.current
-    if (!el) return
-    const callRow = el.closest<HTMLElement>('[data-chat-call-id]')
-    if (callRow && callRow.style.display === 'none') {
-      callRow.style.display = ''
-    }
-    const flowItem = el.closest<HTMLElement>('[data-chat-flow-kind], [data-chat-flow-key]')
-      ?? (el.closest('[data-slot="conversation.chat.node"]')?.parentElement as HTMLElement | null)
-    if (flowItem instanceof HTMLElement && flowItem.style.display === 'none') {
-      flowItem.style.display = ''
-    }
-  })
+  useEffect(() => revealFlowItemAround(rowRef.current))
 
   // Running calls:
   // - If op is non-create (patch/save/revert/read/destroy/list), hide it strictly.
