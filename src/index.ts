@@ -35,6 +35,7 @@ import {
 } from './interaction.ts'
 import { ArtifactStore, rebuildFromMetas, truncateHtml, type ArtifactMetaLike } from './registry.ts'
 import { DEFAULT_PERSIST_ROOT, makePersister, persistDirFor, type ArtifactPersistence } from './persistence.ts'
+import { LIBRARY_MAX_ARTIFACTS, librarySessionIds, readLibraryArtifact, scanLibrary } from './library.ts'
 import { join } from 'node:path'
 
 /** Cordis plugin name. */
@@ -72,9 +73,9 @@ export const Config = z.object({
 })
 
 /** The tool's op vocabulary, one per lifecycle stage. */
-type ArtifactOp = 'create' | 'patch' | 'save' | 'revert' | 'interactive' | 'read' | 'destroy' | 'list'
+type ArtifactOp = 'create' | 'patch' | 'save' | 'revert' | 'interactive' | 'read' | 'destroy' | 'list' | 'library' | 'history' | 'import'
 
-const ARTIFACT_OPS: readonly ArtifactOp[] = ['create', 'patch', 'save', 'revert', 'interactive', 'read', 'destroy', 'list']
+const ARTIFACT_OPS: readonly ArtifactOp[] = ['create', 'patch', 'save', 'revert', 'interactive', 'read', 'destroy', 'list', 'library', 'history', 'import']
 
 interface CreateArgs { op: 'create'; title?: string; html?: string; interactive?: boolean }
 interface PatchArgs { op: 'patch'; id: string; old_string: string; new_string: string; replace_all?: boolean }
@@ -95,9 +96,45 @@ interface RevertValue { op: 'revert'; id: string; version: number; html: string;
 interface InteractiveValue { op: 'interactive'; id: string; version: number; interactive: boolean; title?: string }
 interface ReadValue { op: 'read'; id: string; version: number; html: string; truncated: boolean }
 interface DestroyValue { op: 'destroy'; id: string; removed: true }
-interface ListValue { op: 'list'; dir?: string; artifacts: { id: string; version: number; bytes: number; title?: string }[] }
+interface ListValue { op: 'list'; dir?: string; artifacts: { id: string; version: number; bytes: number; title?: string; origin?: { sessionId: string; artifactId: string } }[] }
 
-type ArtifactValue = CreateValue | PatchValue | SaveValue | RevertValue | InteractiveValue | ReadValue | DestroyValue | ListValue
+/** One importable artifact, as `library` reports it (metadata + short preview). */
+interface LibraryArtifactValue {
+  artifactId: string
+  title?: string
+  versions: number
+  bytes: number
+  preview?: string
+}
+/** One source session in the library listing. */
+interface LibrarySessionValue {
+  sessionId: string
+  title?: string
+  artifacts: LibraryArtifactValue[]
+}
+interface LibraryValue { op: 'library'; sessions: LibrarySessionValue[] }
+
+/** One saved version of an artifact somewhere else, as `history` reports it. */
+interface HistoryValue {
+  op: 'history'
+  sessionId: string
+  artifactId: string
+  title?: string
+  versions: { version: number; time: number; bytes: number }[]
+}
+
+/** The result of importing another session's artifact into this one. */
+interface ImportValue {
+  op: 'import'
+  id: string
+  version: number
+  title?: string
+  html: string
+  versions: number
+  origin: string
+}
+
+type ArtifactValue = CreateValue | PatchValue | SaveValue | RevertValue | InteractiveValue | ReadValue | DestroyValue | ListValue | LibraryValue | HistoryValue | ImportValue
 
 function isArtifactValue(value: unknown): value is ArtifactValue {
   if (value === null || typeof value !== 'object') return false
@@ -210,6 +247,41 @@ function storeFor(agent: Agent | undefined, persistRoot: string | undefined): Ar
     }
   }
   return store
+}
+
+/**
+ * Human titles for source sessions, keyed by the SANITIZED directory name the
+ * library reports.
+ *
+ * WHY THIS IS LABELING ONLY: the artifacts root on disk is the source of truth
+ * for what EXISTS, while `sessionQuery` is a convenience for putting a readable
+ * name on a session. A session whose log is pruned, archived or gone entirely
+ * still has artifacts, and the library must list them — so a failed or empty
+ * title lookup degrades to "show the id", never to "hide the artifact".
+ *
+ * The host keys titles by the REAL session id, while our directories hold the
+ * SANITIZED id; for every id this plugin produces the two are identical (see the
+ * round-trip contract test), so a direct lookup works and a miss is harmless.
+ * @param ctx - the plugin context (sessionQuery is optional).
+ * @param only - restrict the read to one session id.
+ */
+async function readSessionTitles(ctx: Context, only?: string[]): Promise<Map<string, string>> {
+  const titles = new Map<string, string>()
+  const query = (ctx as unknown as {
+    sessionQuery?: { readTitleSnapshots(ids: readonly string[]): Promise<readonly { sessionId: string; status: string; value?: { title?: { title?: string } } }[]> }
+  }).sessionQuery
+  if (query === undefined) return titles
+  try {
+    const results = await query.readTitleSnapshots(only ?? librarySessionIds(DEFAULT_PERSIST_ROOT()))
+    for (const result of results) {
+      if (result.status !== 'fulfilled') continue
+      const title = result.value?.title?.title
+      if (typeof title === 'string' && title !== '') titles.set(result.sessionId, title)
+    }
+  } catch (error) {
+    console.warn('[dsh-html-artifact] session titles unavailable:', error)
+  }
+  return titles
 }
 
 /**
@@ -503,13 +575,17 @@ export function apply(ctx: Context, config: Config = {}): void {
       new_string: { type: 'string', description: 'patch: the replacement text.' },
       replace_all: { type: 'boolean', description: 'patch: replace every occurrence instead of only the first (default false).' },
       version: { type: 'number', description: 'revert: the saved version number to restore (see earlier save results).' },
+      session_id: { type: 'string', description: 'library/history/import: the SOURCE session id, as `library` reports it (the on-disk directory name).' },
+      artifact_id: { type: 'string', description: 'history/import: the SOURCE artifact id within that session, as `library` reports it.' },
+      all_versions: { type: 'boolean', description: 'import: also carry over every saved version of the source artifact (default false = working copy only).' },
+      versions: { type: 'array', items: { type: 'integer' }, description: 'import: carry over ONLY these source version numbers (overrides all_versions). Use op:"history" to see them first.' },
     },
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
         properties: {
-          op: { type: 'string', required: true, enum: ['create', 'patch', 'save', 'revert', 'interactive', 'read', 'destroy', 'list'] },
+          op: { type: 'string', required: true, enum: ['create', 'patch', 'save', 'revert', 'interactive', 'read', 'destroy', 'list', 'library', 'history', 'import'] },
           id: { type: 'string' },
           version: { type: 'integer' },
           title: { type: 'string' },
@@ -521,6 +597,33 @@ export function apply(ctx: Context, config: Config = {}): void {
           interactive: { type: 'boolean' },
           path: { type: 'string' },
           dir: { type: 'string' },
+          origin: { type: 'string' },
+          sessions: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                sessionId: { type: 'string', required: true },
+                title: { type: 'string' },
+                artifacts: {
+                  type: 'array',
+                  required: true,
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      artifactId: { type: 'string', required: true },
+                      title: { type: 'string' },
+                      versions: { type: 'integer', required: true },
+                      bytes: { type: 'integer', required: true },
+                      preview: { type: 'string' },
+                    },
+                  },
+                },
+              },
+            },
+          },
           artifacts: {
             type: 'array',
             items: {
@@ -591,6 +694,42 @@ export function apply(ctx: Context, config: Config = {}): void {
             const dir = value.dir
             return [{ type: 'text', text: `HTML artifacts (${value.artifacts.length}):\n${lines.join('\n')}${dir === undefined ? '' : `\n落盘目录（只读缓存，禁止直接改文件——一律用 artifact 工具修改）: ${dir}`}` }]
           }
+          case 'library': {
+            if (value.sessions.length === 0) {
+              return [{ type: 'text', text: 'No artifacts from OTHER sessions are available to import. (Artifacts in this session are already here — use `list`.)' }]
+            }
+            const lines: string[] = []
+            for (const session of value.sessions) {
+              lines.push(`session ${session.sessionId}${session.title === undefined ? '' : ` — ${session.title}`}`)
+              for (const artifact of session.artifacts) {
+                const label = artifact.title === undefined ? '' : ` (${artifact.title})`
+                lines.push(`- ${artifact.artifactId}${label} · ${artifact.versions} 版本 · ${artifact.bytes} bytes`)
+              }
+            }
+            return [{
+              type: 'text',
+              text: `Importable artifacts from other sessions (${value.sessions.reduce((total, session) => total + session.artifacts.length, 0)}):\n${lines.join('\n')}`
+                + '\nImport one with `op:"import"`, giving its session_id and artifact_id.'
+                + ' By default only the CURRENT state is carried over; pass all_versions:true to bring the whole version history,'
+                + ' or call `op:"history"` first to choose specific versions with versions:[...].'
+                + ' Importing copies INTO this session — the source session is never modified.',
+            }]
+          }
+          case 'history': {
+            const lines = value.versions.map(entry => `- 版本 ${entry.version} · ${entry.bytes} bytes · ${new Date(entry.time).toISOString()}`)
+            return [{
+              type: 'text',
+              text: `Saved versions of ${value.artifactId} in session ${value.sessionId}${value.title === undefined ? '' : ` (${value.title})`}:\n${lines.join('\n')}`
+                + `\nImport the artifact with \`op:"import"\` (versions:[...] to pick specific ones, all_versions:true for every version).`,
+            }]
+          }
+          case 'import':
+            return [{
+              type: 'text',
+              text: `Imported artifact ${value.origin} as ${value.id} (版本 ${value.version}, ${value.versions} 版本 carried over).`
+                + ' It is now a normal artifact of THIS session: patch/save/revert/read all work on it, and the source session is untouched.'
+                + ' The live preview updated in place — this rendering IS the deliverable, do not write prose describing it in your reply.',
+            }]
         }
       },
       presentationMeta: (_args, value): JsonValue => {
@@ -612,15 +751,33 @@ export function apply(ctx: Context, config: Config = {}): void {
             return { op: 'destroy', id: value.id }
           case 'list':
             return { op: 'list', ...value.dir === undefined ? {} : { dir: value.dir }, artifacts: value.artifacts }
+          // An IMPORTED artifact projects exactly like a created one, plus its
+          // provenance, so the canvas renders a live preview and a source badge
+          // with no client special-case beyond reading `origin`.
+          case 'import':
+            return {
+              op: 'create', id: value.id, version: value.version, html: value.html,
+              ...value.title === undefined ? {} : { title: value.title },
+              importedFrom: value.origin,
+            }
+          // `library` and `history` are READ-ONLY listings of other sessions.
+          // They project an op the client already knows how to ignore as a
+          // non-preview card (`list`), rather than a new previewable op: there
+          // is nothing to render, and the canvas must not treat remote content
+          // as this session's artifact. The session/artifact data stays in the
+          // event for the model's own reading.
+          case 'library':
+          case 'history':
+            return { op: 'list', artifacts: [] }
         }
       },
     },
-    execute(args, exec) {
+    async execute(args, exec) {
       const store = storeFor(exec.agent, persistRoot)
       const op = (args as Record<string, unknown>).op
       const rawId = (args as Record<string, unknown>).id
       if (exec.agent !== undefined) {
-        ensureFromLog(exec.agent, store, typeof rawId === 'string' ? rawId : undefined, op === 'list')
+        ensureFromLog(exec.agent, store, typeof rawId === 'string' ? rawId : undefined, op === 'list' || op === 'library')
       }
       switch (op) {
         case 'create': {
@@ -696,6 +853,109 @@ export function apply(ctx: Context, config: Config = {}): void {
           const dir = exec.agent !== undefined && persistRoot !== '' ? persistDirFor(persistRoot, sessionIdOf(exec.agent) ?? 'unknown') : undefined
           return Promise.resolve({ op: 'list', ...dir === undefined ? {} : { dir }, artifacts: store.list() })
         }
+        case 'library': {
+          // READ-ONLY enumeration of other sessions' artifacts. The current
+          // session is excluded (its artifacts are already in the store).
+          const raw = args as Record<string, unknown>
+          const sessionFilter = typeof raw.session_id === 'string' && raw.session_id !== '' ? raw.session_id : undefined
+          const currentSession = exec.agent === undefined ? undefined : sessionIdOf(exec.agent)
+          // Only title the sessions actually being reported: reading titles for
+          // every session directory would be wasteful when one is requested.
+          const titles = await readSessionTitles(ctx, sessionFilter === undefined ? undefined : [sessionFilter])
+          const sessions = scanLibrary(persistRoot, {
+            ...currentSession === undefined ? {} : { excludeSessionId: currentSession },
+            ...sessionFilter === undefined ? {} : { sessionId: sessionFilter },
+            limit: LIBRARY_MAX_ARTIFACTS,
+            ...titles.size === 0 ? {} : { titles },
+          })
+          return Promise.resolve({
+            op: 'library',
+            sessions: sessions.map(session => ({
+              sessionId: session.sessionId,
+              ...session.title === undefined ? {} : { title: session.title },
+              artifacts: session.artifacts.map(artifact => ({
+                artifactId: artifact.artifactId,
+                ...artifact.title === undefined ? {} : { title: artifact.title },
+                versions: artifact.versionCount,
+                bytes: artifact.bytes,
+                preview: artifact.html,
+              })),
+            })),
+          })
+        }
+        case 'history': {
+          const raw = args as Record<string, unknown>
+          const sessionId = requireString(raw, 'session_id', 'history')
+          const artifactId = requireString(raw, 'artifact_id', 'history')
+          const snapshot = readLibraryArtifact(persistRoot, sessionId, artifactId)
+          if (snapshot === undefined) {
+            throw new Error(`artifact history: no artifact ${artifactId} in session ${sessionId}`)
+          }
+          return Promise.resolve({
+            op: 'history',
+            sessionId,
+            artifactId,
+            ...snapshot.title === undefined ? {} : { title: snapshot.title },
+            versions: snapshot.versions.map(entry => ({
+              version: entry.version,
+              time: entry.time,
+              bytes: bytesOf(entry.html),
+            })),
+          })
+        }
+        case 'import': {
+          // ONE-WAY COPY into the current session. The source directory is only
+          // ever READ (readLibraryArtifact); nothing here writes to it.
+          const raw = args as Record<string, unknown>
+          const sessionId = requireString(raw, 'session_id', 'import')
+          const artifactId = requireString(raw, 'artifact_id', 'import')
+          if (exec.agent !== undefined) {
+            const currentSession = sessionIdOf(exec.agent)
+            if (currentSession !== undefined && currentSession === sessionId) {
+              throw new Error('artifact import: that artifact is already in THIS session — use `read` with its id')
+            }
+          }
+          const snapshot = readLibraryArtifact(persistRoot, sessionId, artifactId)
+          if (snapshot === undefined) {
+            throw new Error(`artifact import: no artifact ${artifactId} in session ${sessionId}`)
+          }
+          // Version selection, in precedence order:
+          //   versions:[...]  explicit picks (an AI or user chose them);
+          //   all_versions    everything the source has;
+          //   (default)       the working copy only.
+          // The default keeps an import small: the review's own example was a
+          // 17-version artifact that would otherwise drag ~2 MB across for a
+          // starting point the user usually wants the LATEST of.
+          const requested = Array.isArray(raw.versions)
+            ? (raw.versions as unknown[]).flatMap((entry) => typeof entry === 'number' && Number.isInteger(entry) && entry >= 1 ? [entry] : [])
+            : undefined
+          const allVersions = raw.all_versions === true
+          const wanted = requested === undefined || requested.length === 0 ? undefined : new Set(requested)
+          const sourceVersions = wanted === undefined
+            ? (allVersions ? snapshot.versions : [])
+            : snapshot.versions.filter(entry => wanted.has(entry.version))
+          if (wanted !== undefined && sourceVersions.length === 0) {
+            throw new Error(`artifact import: none of the requested versions exist in ${artifactId} (it has ${snapshot.versions.length})`)
+          }
+          const title = typeof raw.title === 'string' && raw.title.trim() !== '' ? raw.title.trim() : snapshot.title
+          const { id, versions } = store.importArtifact({
+            html: snapshot.html,
+            ...title === undefined ? {} : { title },
+            ...snapshot.interactive === undefined ? {} : { interactive: snapshot.interactive },
+            versions: sourceVersions,
+            origin: { sessionId, artifactId },
+          }, maxArtifactBytes, { includeVersions: wanted !== undefined || allVersions })
+          const state = store.get(id)
+          return Promise.resolve({
+            op: 'import',
+            id,
+            version: state.version,
+            html: state.html,
+            versions,
+            origin: `${sessionId}/${artifactId}`,
+            ...state.title === undefined ? {} : { title: state.title },
+          })
+        }
         default:
           throw new Error(`artifact: unknown op ${String(op)}`)
       }
@@ -716,6 +976,9 @@ export function apply(ctx: Context, config: Config = {}): void {
         case 'read': return { card: 'generic', title: `读取 artifact ${String(id)}`, kind: 'read' }
         case 'destroy': return { card: 'generic', title: `删除 artifact ${String(id)}`, kind: 'delete' }
         case 'list': return { card: 'generic', title: '列出 HTML artifacts', kind: 'read' }
+        case 'library': return { card: 'generic', title: '浏览其他会话的 artifact 库', kind: 'read' }
+        case 'history': return { card: 'generic', title: `查看 ${String(record.session_id ?? '')}/${String(record.artifact_id ?? '')} 的版本`, kind: 'read' }
+        case 'import': return { card: 'generic', title: `导入 ${String(record.session_id ?? '')}/${String(record.artifact_id ?? '')}`, kind: 'other' }
         default: return undefined
       }
     },

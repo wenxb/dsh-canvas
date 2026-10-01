@@ -46,6 +46,9 @@ interface InternalState {
   versions: ArtifactVersion[]
   /** Soft-deleted via the destroy op: invisible to the model, kept on disk. */
   deleted?: boolean
+  /** Set when this artifact was imported from another session (provenance for
+   *  the canvas badge and for `library`/`read`). Absent = created here. */
+  origin?: { sessionId: string; artifactId: string }
 }
 
 /** One listable artifact summary, as the `list` op reports it. */
@@ -54,6 +57,8 @@ export interface ArtifactSummary {
   version: number
   bytes: number
   title?: string
+  /** Present when this artifact was imported from another session. */
+  origin?: { sessionId: string; artifactId: string }
 }
 
 /** Replacement outcome of one `patch` op. */
@@ -451,7 +456,7 @@ export class ArtifactStore {
    * @param snapshot - the log-derived state.
    * @returns whether the store adopted the incoming snapshot.
    */
-  adoptReplay(id: string, snapshot: { html: string; title?: string; interactive?: boolean; deleted?: boolean; versions: ArtifactVersion[] }): boolean {
+  adoptReplay(id: string, snapshot: { html: string; title?: string; interactive?: boolean; deleted?: boolean; origin?: { sessionId: string; artifactId: string }; versions: ArtifactVersion[] }): boolean {
     const existing = this.states.get(id)
     if (existing === undefined) {
       this.restore(id, snapshot)
@@ -466,6 +471,8 @@ export class ArtifactStore {
       incoming === have
       && existing.html === snapshot.html
       && (existing.deleted === true) === (snapshot.deleted === true)
+      && existing.origin?.artifactId === snapshot.origin?.artifactId
+      && existing.origin?.sessionId === snapshot.origin?.sessionId
     ) {
       return false
     }
@@ -474,6 +481,67 @@ export class ArtifactStore {
     // at the same version means it holds a later unsaved patch.
     this.restore(id, snapshot)
     return true
+  }
+
+  /**
+   * Import a snapshot as a NEW artifact in this store, preserving its version
+   * history and recording where it came from.
+   *
+   * ONE-WAY COPY: the caller passes a snapshot it read from elsewhere; this
+   * method never reads or writes another session's directory. Importing into
+   * the CURRENT session is the whole point — the source session's canvas is
+   * never modified, which is the safety property this feature rests on.
+   *
+   * The imported artifact takes a FRESH id from this store's namespace: ids are
+   * only unique within a session's own directory, so reusing the source id
+   * could collide with an artifact this session already has. Version numbers
+   * are re-based to be contiguous from 1, because the server indexes versions by
+   * number and `revertTo` looks them up by it — a history with gaps would be
+   * navigable in the canvas but unusable by the model.
+   * @param snapshot - the source state (working copy + saved versions).
+   * @param maxBytes - byte cap on the stored source.
+   * @param options.includeVersions - false carries the working copy only.
+   * @returns the new artifact's id and how many versions it now holds.
+   */
+  importArtifact(snapshot: {
+    html: string
+    title?: string
+    interactive?: boolean
+    versions: readonly ArtifactVersion[]
+    origin?: { sessionId: string; artifactId: string }
+  }, maxBytes: number, options: { includeVersions?: boolean } = {}): { id: string; versions: number } {
+    if (byteLength(snapshot.html) > maxBytes) throw new ArtifactTooLargeError(maxBytes)
+    const id = makeArtifactId(new Set(this.states.keys()))
+    const source = options.includeVersions === false
+      ? []
+      : [...snapshot.versions].sort((a, b) => a.version - b.version)
+    const versions: ArtifactVersion[] = source.map((entry, index) => ({
+      version: index + 1,
+      html: entry.html,
+      time: entry.time,
+    }))
+    const latest = versions[versions.length - 1]
+    if (latest === undefined || latest.html !== snapshot.html) {
+      // The working copy is ahead of (or unrelated to) the newest saved
+      // version — that is precisely the "unsaved edits" state, so no extra
+      // version is invented; the working-copy bytes are stored as they are.
+      versions.push({ version: versions.length + 1, html: snapshot.html, time: Date.now() })
+    }
+    while (versions.length > MAX_VERSIONS) versions.shift()
+    this.states.set(id, {
+      html: snapshot.html,
+      ...snapshot.title === undefined ? {} : { title: snapshot.title },
+      ...snapshot.interactive === undefined ? {} : { interactive: snapshot.interactive },
+      ...snapshot.origin === undefined ? {} : { origin: snapshot.origin },
+      versions,
+    })
+    this.writeCreated(id, versions)
+    return { id, versions: versions.length }
+  }
+
+  /** Where an artifact was imported from, if it was. */
+  originOf(id: string): { sessionId: string; artifactId: string } | undefined {
+    return this.internal(id).origin
   }
 
   /**
@@ -489,12 +557,13 @@ export class ArtifactStore {
    * @param id - the artifact id.
    * @param snapshot - the reconstructed state (html/title/interactive/versions).
    */
-  restore(id: string, snapshot: { html: string; title?: string; interactive?: boolean; deleted?: boolean; versions: ArtifactVersion[] }): void {
+  restore(id: string, snapshot: { html: string; title?: string; interactive?: boolean; deleted?: boolean; origin?: { sessionId: string; artifactId: string }; versions: ArtifactVersion[] }): void {
     this.states.set(id, {
       html: snapshot.html,
       ...snapshot.title === undefined ? {} : { title: snapshot.title },
       ...snapshot.interactive === undefined ? {} : { interactive: snapshot.interactive },
       ...snapshot.deleted === true ? { deleted: true } : {},
+      ...snapshot.origin === undefined ? {} : { origin: snapshot.origin },
       versions: [...snapshot.versions],
     })
   }
@@ -528,6 +597,7 @@ export class ArtifactStore {
       version: state.versions[state.versions.length - 1]?.version ?? 1,
       bytes: byteLength(state.html),
       ...state.title === undefined ? {} : { title: state.title },
+      ...state.origin === undefined ? {} : { origin: state.origin },
     }))
   }
 
@@ -584,6 +654,7 @@ export class ArtifactStore {
       ...internal.title === undefined ? {} : { title: internal.title },
       ...internal.interactive === undefined ? {} : { interactive: internal.interactive },
       ...internal.deleted === true ? { deleted: true } : {},
+      ...internal.origin === undefined ? {} : { origin: internal.origin },
       bytes: byteLength(internal.html),
       versions: internal.versions.map(entry => ({ version: entry.version, time: entry.time, bytes: byteLength(entry.html) })),
     })

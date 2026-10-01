@@ -36,6 +36,8 @@ export interface PersistedArtifact {
   versions: ArtifactVersion[]
   /** Soft-deleted (destroy op): files stay on disk for manual recovery. */
   deleted?: boolean
+  /** Provenance when the artifact was imported from another session. */
+  origin?: { sessionId: string; artifactId: string }
 }
 
 /** The store-facing persistence seam (fs-backed by {@link makePersister}).
@@ -74,6 +76,8 @@ export interface ArtifactManifest {
   title?: string
   interactive?: boolean
   deleted?: boolean
+  /** Provenance when the artifact was imported from another session. */
+  origin?: { sessionId: string; artifactId: string }
   /** Total bytes of the working copy. */
   bytes?: number
   versions: { version: number; time: number; bytes?: number }[]
@@ -81,6 +85,13 @@ export interface ArtifactManifest {
 
 /** The default root: per-session directories under the DSH home. */
 export const DEFAULT_PERSIST_ROOT = (): string => join(homedir(), '.dsh', 'artifacts')
+
+/** Type guard for a persisted origin record (manifests are untrusted input). */
+function isOrigin(value: unknown): value is { sessionId: string; artifactId: string } {
+  if (value === null || typeof value !== 'object') return false
+  const candidate = value as { sessionId?: unknown; artifactId?: unknown }
+  return typeof candidate.sessionId === 'string' && typeof candidate.artifactId === 'string'
+}
 
 function safeName(id: string): string | undefined {
   return /^[a-z0-9][a-z0-9._-]*$/i.test(id) ? id : undefined
@@ -192,6 +203,7 @@ export function makePersister(root: string, sessionId: string): ArtifactPersiste
           id: manifest.id,
           html,
           ...manifest.deleted === true ? { deleted: true } : {},
+          ...isOrigin(manifest.origin) ? { origin: manifest.origin } : {},
           ...typeof manifest.title === 'string' ? { title: manifest.title } : {},
           ...typeof manifest.interactive === 'boolean' ? { interactive: manifest.interactive } : {},
           versions,
