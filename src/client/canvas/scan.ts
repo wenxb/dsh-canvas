@@ -125,6 +125,19 @@ export interface ArtifactTimeline {
 const CHECKPOINT_OPS: readonly string[] = ['create', 'save']
 
 /**
+ * Saved versions the server keeps per artifact. MUST match `MAX_VERSIONS` in
+ * src/registry.ts — the server trims its version list on `save`, and the client
+ * rebuilds the same list from the log, which is never trimmed. Without this cap
+ * the two disagree: the canvas would list a version the server already shifted
+ * away, and 回退 to it fails with UnknownVersionError.
+ *
+ * A cross-check test (tests/scan-cap.spec.ts) fails if the two constants drift,
+ * because this is a silent-divergence bug class — nothing at runtime detects
+ * it until a user reverts to a version that no longer exists.
+ */
+export const MAX_CLIENT_VERSIONS = 20
+
+/**
  * Build per-artifact histories from timeline entries.
  * @param entries - scanned entries in timeline order.
  * @returns timelines keyed by artifact id (insertion order = first appearance).
@@ -163,6 +176,8 @@ export function buildTimelines(entries: readonly ArtifactEntry[]): Map<string, A
         : (previous?.version ?? 0) + 1
       timeline.checkpoints.push({ version, html: entry.html, title: entry.title, seq: entry.seq, time: entry.time })
       timeline.workingDirty = false
+      // Mirror the server's trim so both sides expose the same version set.
+      while (timeline.checkpoints.length > MAX_CLIENT_VERSIONS) timeline.checkpoints.shift()
     } else if (entry.op === 'revert' && entry.html !== undefined) {
       // A revert resets the working copy without creating a version; whether
       // it is "dirty" depends on where it landed relative to the checkpoints.
@@ -178,6 +193,7 @@ export function buildTimelines(entries: readonly ArtifactEntry[]): Map<string, A
         // "未保存" while the working copy is in fact an exact save.
         timeline.checkpoints.push({ version: entry.version, html: entry.html, title: entry.title, seq: entry.seq, time: entry.time })
         timeline.checkpoints.sort((a, b) => a.version - b.version)
+        while (timeline.checkpoints.length > MAX_CLIENT_VERSIONS) timeline.checkpoints.shift()
         timeline.workingDirty = false
       } else {
         timeline.workingDirty = true

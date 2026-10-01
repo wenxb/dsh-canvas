@@ -86,9 +86,26 @@ function safeName(id: string): string | undefined {
   return /^[a-z0-9][a-z0-9._-]*$/i.test(id) ? id : undefined
 }
 
-/** The on-disk directory of one session's artifacts (sanitized session id). */
+/**
+ * The on-disk directory of one session's artifacts (sanitized session id).
+ *
+ * TRAVERSAL-SAFE: the character filter alone is not enough. `.` is a legal id
+ * character (session ids contain dots), so a bare `..` or `.` survives the
+ * filter — and `join(root, '..')` resolves OUTSIDE the artifacts root, which
+ * for the sanitizer's own contract is an escape. Any all-dots name is
+ * therefore mapped to a fixed placeholder. Real session ids
+ * (`session-<uuid>`, or a bare uuid) round-trip unchanged, which matters
+ * because a consumer reading directory names back off disk keys on the
+ * sanitized form.
+ * @param root - the artifacts root.
+ * @param sessionId - the owning session's id.
+ * @returns the absolute directory holding that session's artifacts.
+ */
 export function persistDirFor(root: string, sessionId: string): string {
-  return join(root, sessionId.replace(/[^a-z0-9._-]/gi, '_'))
+  const sanitized = sessionId.replace(/[^a-z0-9._-]/gi, '_')
+  // A name of only dots IS a path segment ('.' = self, '..' = parent): it would
+  // alias or escape the root rather than name a child directory.
+  return join(root, /^\.+$/.test(sanitized) ? 'unknown-session' : sanitized)
 }
 
 function safeSessionDir(root: string, sessionId: string): string {
