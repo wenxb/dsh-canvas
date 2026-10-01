@@ -21,12 +21,24 @@
  * @module
  */
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
-import { canvasBridge, fetchLibrary, fetchLibraryVersions, submitImport, submitInteraction, submitRevert, useCanvasState, activeSessionIdOf, MAX_IMPORT_VERSIONS, type CanvasSnapshot, type LibraryArtifact, type LibraryListing, type LibraryVersion } from './state.ts'
+import { canvasBridge, fetchLibrary, fetchLibraryVersions, sessionDisplayTitle, submitImport, submitInteraction, submitRevert, useCanvasState, activeSessionIdOf, MAX_IMPORT_VERSIONS, type CanvasSnapshot, type LibraryArtifact, type LibraryListing, type LibraryVersion } from './state.ts'
 import { buildSandboxedHtmlDocument, useArtifactTheme } from '../sandbox.ts'
 import { buildStreamingBridgeDocument } from '../stream/bridge.ts'
 import { IconCheck, IconChevronLeft, IconChevronRight, IconCode, IconDownload, IconEye, IconFileCode, IconImport, IconRefresh, IconRevert, IconSend } from '../icons.tsx'
 import css from '../artifact.module.css'
 import { highlightHtml } from '../highlight.ts'
+
+/**
+ * The label for a source session: the host's title when it has one, else the
+ * client's own `displayTitle` (free — see `sessionDisplayTitle`), else the raw
+ * id. The id is always available, so a row is never nameless even for a session
+ * whose log is gone.
+ * @param session - one library session entry.
+ * @returns the text to show.
+ */
+function sessionName(session: { sessionId: string; title?: string }): string {
+  return session.title ?? sessionDisplayTitle(session.sessionId) ?? session.sessionId
+}
 
 /** Ask a settled surface's collect bridge for its interaction data. */
 /** Format a byte COUNT (already known) for picker metadata. */
@@ -200,8 +212,8 @@ function ImportPicker({ onClose }: { onClose: () => void }) {
       {/* Step 1 — source artifacts. */}
       {chosen === undefined && listing !== undefined && listing.ok && listing.sessions.map(session => (
         <div key={session.sessionId} className={css.libSession}>
-          <span className={css.libSessionName} title={session.title ?? session.sessionId}>
-            {session.title ?? session.sessionId}
+          <span className={css.libSessionName} title={sessionName(session)}>
+            {sessionName(session)}
           </span>
           {session.artifacts.map(artifact => (
             <button

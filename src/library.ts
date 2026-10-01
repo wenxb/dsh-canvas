@@ -39,9 +39,11 @@ export interface LibraryEntry {
 /** All artifacts in one session directory. */
 export interface LibrarySession {
   sessionId: string
-  /** Human title of the SOURCE session, when the host can supply one. Labeling
-   *  only: a session with no title still lists (its id is a usable label). */
-  title?: string
+  /**
+   * NO session title, deliberately: naming a session requires folding its LOG,
+   * and the CLIENT already holds every `displayTitle` in `sessions.list`. The
+   * browser half joins it for free.
+   */
   artifacts: LibraryEntry[]
 }
 
@@ -188,7 +190,6 @@ export function libraryListingPayload(sessions: LibrarySession[]): {
   ok: true
   sessions: {
     sessionId: string
-    title?: string
     artifacts: {
       artifactId: string
       title?: string
@@ -203,7 +204,6 @@ export function libraryListingPayload(sessions: LibrarySession[]): {
     ok: true,
     sessions: sessions.map(session => ({
       sessionId: session.sessionId,
-      ...session.title === undefined ? {} : { title: session.title },
       artifacts: session.artifacts.map(artifact => ({
         artifactId: artifact.artifactId,
         ...artifact.title === undefined ? {} : { title: artifact.title },

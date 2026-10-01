@@ -54,9 +54,9 @@ function stubFetch(body: unknown): void {
 }
 
 describe('listing payload round-trips through the client parser', () => {
-  it('preserves ids, titles, counts, sizes and provenance', async () => {
+  it('preserves ids, counts, sizes and provenance', async () => {
     const seam = seedRoot()
-    const sessions = scanLibrary(seam, { titles: new Map([['session-source', '源会话标题']]) })
+    const sessions = scanLibrary(seam)
     stubFetch(listingLibraryPayload(sessions))
 
     const parsed = await fetchLibrary(undefined)
@@ -65,9 +65,7 @@ describe('listing payload round-trips through the client parser', () => {
 
     expect(parsed.sessions).toHaveLength(1)
     const session = parsed.sessions[0]
-    // The session title comes from the host's title map, not the directory name.
     expect(session?.sessionId).toBe('session-source')
-    expect(session?.title).toBe('源会话标题')
 
     const artifact = session?.artifacts[0]
     expect(artifact?.artifactId).toBe('art-demo')
@@ -89,7 +87,9 @@ describe('listing payload round-trips through the client parser', () => {
     // `undefined` does not survive JSON anyway, but a literal null WOULD reach
     // the client as a present-but-null title.
     expect(serialized).not.toContain('null')
-    expect(payload.sessions[0]?.title).toBeUndefined()
+    // No session title exists on the wire at all now (the client joins it), so
+    // only the ARTIFACT title can be absent here.
+    expect(serialized).not.toContain('源会话标题')
     expect(payload.sessions[0]?.artifacts[0]?.title).toBeUndefined()
     expect(payload.sessions[0]?.artifacts[0]?.origin).toBeUndefined()
   })

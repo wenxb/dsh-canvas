@@ -66,7 +66,19 @@ function seedRoot(): string {
   return root
 }
 
-/** Run `apply()` against a stand-in context and capture the library route. */
+/** Records any attempt to fold session logs for titles. */
+const titleProbes: string[] = []
+
+/**
+ * Run `apply()` against a stand-in context and capture the library route.
+ *
+ * `sessionQuery.readTitleSnapshots` is a TRIPWIRE: resolving a session title
+ * means folding that session's LOG, which measured 32.4 seconds and +278 MB for
+ * a single listing against a real 107-directory artifacts root. The listing
+ * must never do it — session names are a free client-side join from the
+ * `displayTitle` the session list already holds. Any call here is recorded and
+ * fails the performance test below.
+ */
 function captureLibraryRoute(persistRoot: string): CapturedRoute {
   let captured: CapturedRoute | undefined
   const ctx = {
@@ -83,7 +95,12 @@ function captureLibraryRoute(persistRoot: string): CapturedRoute {
       callback({ skills: { register: () => () => {} } })
       return () => {}
     },
-    get: () => undefined,
+    // A live-shaped proxy: `get` resolves the optional service, so a
+    // reintroduced title fold would find a working (tripwire) implementation
+    // rather than silently no-op'ing on undefined.
+    get: (name: string) => name === 'sessionQuery'
+      ? { readTitleSnapshots: async (ids: readonly string[]) => { titleProbes.push(...ids); return [] } }
+      : undefined,
     on: () => () => {},
     logger: { warn: () => {}, info: () => {}, error: () => {} },
   }
@@ -205,5 +222,53 @@ describe('the library route — the picker\'s only data source', () => {
       method: 'GET',
     })
     expect(reply.status).toBe(403)
+  })
+})
+
+/*
+ * THE PERFORMANCE CONTRACT — the listing must not read session logs.
+ *
+ * This test exists because the shipped version DID: the route asked the host to
+ * fold every session's title out of its log, so opening the import picker took
+ * 32.4 seconds and grew the server by 278 MB on a real root (107 session
+ * directories, 43 with artifacts). Nothing in the previous suite noticed,
+ * because every fixture had one or two sessions — the cost scales with the
+ * user's history, which is exactly what a small fixture cannot show.
+ *
+ * So the assertion is not "it is fast" (wall-clock assertions are flaky); it is
+ * "it never folds a log", which is the actual defect and is deterministic. The
+ * listing stays O(artifacts-on-disk) manifest reads, which is milliseconds.
+ */
+describe('the listing never folds session logs for titles', () => {
+  it('does not call readTitleSnapshots on the listing path', async () => {
+    titleProbes.length = 0
+    const seam = seedRoot()
+    const reply = await callRoute(captureLibraryRoute(seam), trustedRequest('/artifact/api/library'))
+    expect(reply.status).toBe(200)
+    expect(titleProbes).toEqual([])
+  })
+
+  it('does not call it for the version step either (the client names that row)', async () => {
+    titleProbes.length = 0
+    const seam = seedRoot()
+    const reply = await callRoute(
+      captureLibraryRoute(seam),
+      trustedRequest('/artifact/api/library?sessionId=session-other&artifactId=art-x'),
+    )
+    expect(reply.status).toBe(200)
+    expect(titleProbes).toEqual([])
+  })
+
+  it('still lists a session whose log is gone, naming it by id', async () => {
+    // The artifacts root is the source of truth for what EXISTS. A pruned,
+    // archived or deleted session keeps its artifacts and must stay importable
+    // even though no title can ever be resolved for it.
+    titleProbes.length = 0
+    const seam = seedRoot()
+    const reply = await callRoute(captureLibraryRoute(seam), trustedRequest('/artifact/api/library'))
+    const session = reply.body.sessions.find((s: any) => s.sessionId === 'session-other')
+    expect(session).toBeDefined()
+    expect(session.title).toBeUndefined()
+    expect(titleProbes).toEqual([])
   })
 })

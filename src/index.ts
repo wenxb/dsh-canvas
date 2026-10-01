@@ -34,7 +34,7 @@ type JsonValue = string | number | boolean | null | { [key: string]: JsonValue }
 import { parseImportRequest, parseRevertRequest, parseSubmissionPayload, renderInteractionSubmission, renderSubmissionSummary, resolveImportContent } from './interaction.ts'
 import { ArtifactStore, UnknownVersionError, rebuildFromMetas, truncateHtml, type ArtifactMetaLike } from './registry.ts'
 import { DEFAULT_PERSIST_ROOT, makePersister, persistDirFor, type ArtifactPersistence } from './persistence.ts'
-import { LIBRARY_MAX_ARTIFACTS, libraryListingPayload, librarySessionIds, libraryVersionsPayload, readLibraryArtifact, scanLibrary } from './library.ts'
+import { LIBRARY_MAX_ARTIFACTS, libraryListingPayload, libraryVersionsPayload, readLibraryArtifact, scanLibrary } from './library.ts'
 import {
   ARTIFACT_SKILL_BODY,
   ARTIFACT_SKILL_DESCRIPTION,
@@ -322,50 +322,6 @@ function storeFor(agent: Agent | undefined, persistRoot: string | undefined): Ar
 }
 
 /**
- * Human titles for source sessions, keyed by the SANITIZED directory name the
- * library reports.
- *
- * WHY THIS IS LABELING ONLY: the artifacts root on disk is the source of truth
- * for what EXISTS, while `sessionQuery` is a convenience for putting a readable
- * name on a session. A session whose log is pruned, archived or gone entirely
- * still has artifacts, and the library must list them — so a failed or empty
- * title lookup degrades to "show the id", never to "hide the artifact".
- *
- * The host keys titles by the REAL session id, while our directories hold the
- * SANITIZED id; for every id this plugin produces the two are identical (see the
- * round-trip contract test), so a direct lookup works and a miss is harmless.
- * @param ctx - the plugin context (sessionQuery is optional).
- * @param only - restrict the read to one session id.
- */
-async function readSessionTitles(ctx: Context, only?: string[]): Promise<Map<string, string>> {
-  const titles = new Map<string, string>()
-  // `ctx.get()`, NOT `ctx.sessionQuery`: the context proxy THROWS on an
-  // undeclared property ("cannot get property \"sessionQuery\" without
-  // inject"), and `sessionQuery` is deliberately not injected — declaring it
-  // would make it REQUIRED and prevent the plugin from loading in a profile
-  // that lacks it. A TypeScript cast silences the compiler but not the runtime
-  // proxy, so the throw escaped the try/catch below (it is raised by the
-  // property ACCESS, before the call) and turned every library listing into a
-  // 500. Caught by live verification; no unit test could reach this, because a
-  // stand-in ctx has no proxy to throw.
-  const query = ctx.get('sessionQuery') as
-    | { readTitleSnapshots(ids: readonly string[]): Promise<readonly { sessionId: string; status: string; value?: { title?: { title?: string } } }[]> }
-    | undefined
-  if (query === undefined) return titles
-  try {
-    const results = await query.readTitleSnapshots(only ?? librarySessionIds(DEFAULT_PERSIST_ROOT()))
-    for (const result of results) {
-      if (result.status !== 'fulfilled') continue
-      const title = result.value?.title?.title
-      if (typeof title === 'string' && title !== '') titles.set(result.sessionId, title)
-    }
-  } catch (error) {
-    console.warn('[dsh-html-artifact] session titles unavailable:', error)
-  }
-  return titles
-}
-
-/**
  * Rebuild this session's artifacts from the durable log when the in-memory
  * store lost them (server restart / agent respawn). The session log is the
  * durable source of truth: every artifact op projects its full result meta
@@ -634,12 +590,10 @@ export function apply(ctx: Context, config: Config = {}): void {
           return
         }
         // First step: sessions and their importable artifacts.
-        const titles = await readSessionTitles(ctx, sourceSession === undefined ? undefined : [sourceSession])
         const sessions = scanLibrary(persistRoot, {
           ...currentSession === undefined || currentSession === '' ? {} : { excludeSessionId: currentSession },
           ...sourceSession === undefined ? {} : { sessionId: sourceSession },
           limit: LIBRARY_MAX_ARTIFACTS,
-          ...titles.size === 0 ? {} : { titles },
         })
         reply(200, libraryListingPayload(sessions))
       } catch (error) {
@@ -1165,20 +1119,15 @@ export function apply(ctx: Context, config: Config = {}): void {
           const raw = args as Record<string, unknown>
           const sessionFilter = typeof raw.session_id === 'string' && raw.session_id !== '' ? raw.session_id : undefined
           const currentSession = exec.agent === undefined ? undefined : sessionIdOf(exec.agent)
-          // Only title the sessions actually being reported: reading titles for
-          // every session directory would be wasteful when one is requested.
-          const titles = await readSessionTitles(ctx, sessionFilter === undefined ? undefined : [sessionFilter])
           const sessions = scanLibrary(persistRoot, {
             ...currentSession === undefined ? {} : { excludeSessionId: currentSession },
             ...sessionFilter === undefined ? {} : { sessionId: sessionFilter },
             limit: LIBRARY_MAX_ARTIFACTS,
-            ...titles.size === 0 ? {} : { titles },
           })
           return Promise.resolve({
             op: 'library',
             sessions: sessions.map(session => ({
               sessionId: session.sessionId,
-              ...session.title === undefined ? {} : { title: session.title },
               artifacts: session.artifacts.map(artifact => ({
                 artifactId: artifact.artifactId,
                 ...artifact.title === undefined ? {} : { title: artifact.title },

@@ -1386,7 +1386,12 @@ export interface LibraryArtifact {
 /** One source session and its importable artifacts. */
 export interface LibrarySession {
   sessionId: string
-  title?: string
+  /**
+   * NO title: the host does not resolve session titles (that would fold session
+   * logs — 32.4s and +278 MB for one listing). The browser names sessions from
+   * the `displayTitle` the session list already carries, via
+   * {@link sessionDisplayTitle}.
+   */
   artifacts: LibraryArtifact[]
 }
 
@@ -1423,6 +1428,38 @@ export const MAX_IMPORT_VERSIONS = 20
  * @param currentSessionId - excluded from the listing (already in the store).
  * @returns the listing, or a reason it could not be read.
  */
+/**
+ * The human title of a session, read from the session list the client ALREADY
+ * HOLDS — free, synchronous, no log folding.
+ *
+ * WHY THIS EXISTS (a removed 32-SECOND stall): the library listing used to have
+ * the HOST resolve session titles via `sessionQuery.readTitleSnapshots`, which
+ * folds session LOGS. Measured live against a real artifacts root (107 session
+ * directories), that made one listing request take 32.4s and grow the server
+ * from 615 MB to 893 MB — it read every session log to decorate a picker. The
+ * host no longer resolves titles at all.
+ *
+ * The client needs no such work: `sessions.list` entries already carry a
+ * `displayTitle` (the very field the sidebar renders), so the join is a Map
+ * lookup. A session whose title is missing degrades to its id, exactly as
+ * before — the artifacts root stays the source of truth for what EXISTS, so a
+ * titleless session must still be listed and importable.
+ * @param sessionId - the session to name.
+ * @returns the display title, or undefined when it is unknown or blank.
+ */
+export function sessionDisplayTitle(sessionId: string): string | undefined {
+  try {
+    const snapshot = activeSessions?.list?.getSnapshot?.() as
+      | { byId?: Record<string, { displayTitle?: unknown } | undefined> }
+      | undefined
+    const title = snapshot?.byId?.[sessionId]?.displayTitle
+    return typeof title === 'string' && title !== '' ? title : undefined
+  } catch {
+    // A not-yet-mounted list must never break the picker.
+    return undefined
+  }
+}
+
 export async function fetchLibrary(currentSessionId: string | undefined): Promise<LibraryListing> {
   const query = currentSessionId === undefined ? '' : `?currentSessionId=${encodeURIComponent(currentSessionId)}`
   try {
@@ -1455,11 +1492,7 @@ export async function fetchLibrary(currentSessionId: string | undefined): Promis
         })
       }
       if (artifacts.length === 0) continue
-      sessions.push({
-        sessionId: entry.sessionId,
-        ...typeof entry.title === 'string' ? { title: entry.title } : {},
-        artifacts,
-      })
+      sessions.push({ sessionId: entry.sessionId, artifacts })
     }
     return { ok: true, sessions }
   } catch (error) {

@@ -17,8 +17,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   MAX_IMPORT_VERSIONS,
+  canvasBridge,
   fetchLibrary,
   fetchLibraryVersions,
+  sessionDisplayTitle,
 } from '../src/client/canvas/state.ts'
 import { MAX_VERSIONS } from '../src/registry.ts'
 
@@ -43,7 +45,6 @@ describe('fetchLibrary', () => {
       ok: true,
       sessions: [{
         sessionId: 'session-old',
-        title: '旧会话',
         artifacts: [{ artifactId: 'art-a', title: '图', versions: 3, bytes: 2048 }],
       }],
     })
@@ -51,10 +52,20 @@ describe('fetchLibrary', () => {
       ok: true,
       sessions: [{
         sessionId: 'session-old',
-        title: '旧会话',
         artifacts: [{ artifactId: 'art-a', title: '图', versions: 3, bytes: 2048 }],
       }],
     })
+  })
+
+  it('IGNORES a session title even if an older host sends one', async () => {
+    // Forward/backward compatibility across the wire: session naming moved to
+    // the client, so a title field from a stale host must not break parsing.
+    stubFetch({ ok: true, sessions: [{ sessionId: 's', title: '旧字段', artifacts: [{ artifactId: 'a' }] }] })
+    const result = await fetchLibrary(undefined)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.sessions[0]?.sessionId).toBe('s')
+    expect(result.sessions[0]?.artifacts).toHaveLength(1)
   })
 
   it('excludes the CURRENT session through the query string', async () => {
@@ -175,5 +186,86 @@ describe('the import cap mirrors the host', () => {
   it('MAX_IMPORT_VERSIONS equals the store cap the host trims to', () => {
     // If these drift, the picker offers a selection the host silently truncates.
     expect(MAX_IMPORT_VERSIONS).toBe(MAX_VERSIONS)
+  })
+})
+
+/*
+ * The CLIENT-SIDE session-title join.
+ *
+ * Session naming moved out of the host deliberately: resolving a title means
+ * folding that session's LOG, which measured 32.4s and +278 MB for one listing
+ * on a real root. The client already holds every `displayTitle` in
+ * `sessions.list`, so the name is a Map lookup here instead.
+ *
+ * This is also the only reason the host can stay title-free, so the join has to
+ * be pinned: if it silently returned undefined, every picker row would show a
+ * raw session id and the 32-second host fold would look like the only fix.
+ */
+describe('sessionDisplayTitle — the free client-side join', () => {
+  /** Bind the bridge to a stand-in sessions service and return the disposer. */
+  function bindWith(byId: Record<string, unknown>): () => void {
+    canvasBridge.resetForTests()
+    const ctx = {
+      sessions: {
+        list: {
+          getSnapshot: () => ({ ids: Object.keys(byId), byId }),
+          subscribe: () => () => {},
+        },
+      },
+      get: () => undefined,
+      on: () => () => {},
+      effect: (fn: () => unknown) => (typeof fn === 'function' ? fn() : undefined),
+      logger: { warn: () => {}, info: () => {}, error: () => {} },
+    }
+    return canvasBridge.init(ctx as never)
+  }
+
+  it('reads displayTitle from the session list', () => {
+    const dispose = bindWith({ 's-1': { id: 's-1', displayTitle: '斗地主静态原型画布设计' } })
+    try {
+      expect(sessionDisplayTitle('s-1')).toBe('斗地主静态原型画布设计')
+    } finally { dispose() }
+  })
+
+  it('returns undefined for an unknown session, so the caller can fall back to the id', () => {
+    const dispose = bindWith({ 's-1': { id: 's-1', displayTitle: '标题' } })
+    try {
+      expect(sessionDisplayTitle('missing')).toBeUndefined()
+    } finally { dispose() }
+  })
+
+  it('returns undefined for a blank title rather than an empty label', () => {
+    const dispose = bindWith({ 's-1': { id: 's-1', displayTitle: '' } })
+    try {
+      expect(sessionDisplayTitle('s-1')).toBeUndefined()
+    } finally { dispose() }
+  })
+
+  it('tolerates a non-string displayTitle', () => {
+    const dispose = bindWith({ 's-1': { id: 's-1', displayTitle: 42 } })
+    try {
+      expect(sessionDisplayTitle('s-1')).toBeUndefined()
+    } finally { dispose() }
+  })
+
+  it('is safe before the bridge is bound (no service yet)', () => {
+    canvasBridge.resetForTests()
+    expect(sessionDisplayTitle('s-1')).toBeUndefined()
+  })
+
+  it('never throws when the list itself throws', () => {
+    canvasBridge.resetForTests()
+    const ctx = {
+      sessions: { list: { getSnapshot: () => { throw new Error('boom') }, subscribe: () => () => {} } },
+      get: () => undefined,
+      on: () => () => {},
+      effect: (fn: () => unknown) => (typeof fn === 'function' ? fn() : undefined),
+      logger: { warn: () => {}, info: () => {}, error: () => {} },
+    }
+    const dispose = canvasBridge.init(ctx as never)
+    try {
+      // A throwing list must degrade to "show the id", never break the picker.
+      expect(sessionDisplayTitle('s-1')).toBeUndefined()
+    } finally { dispose() }
   })
 })
