@@ -214,3 +214,87 @@ describe('forked-session rebuild (tail-only history)', () => {
     expect(store.get('art-f')!.html).toBe('<p>v7</p>')
   })
 })
+
+/*
+ * F4 — the stale-patch bug. Disk-first boot restores an artifact, then log
+ * replay must still fold in log content that is NEWER than the disk cache.
+ *
+ * The old replay guard was `if (!store.has(id)) store.restore(...)`: because
+ * the disk cache is written on mutation it can lag the log, and every artifact
+ * op projects its full html into the log, so the log is authoritative for
+ * content. Skipping an already-present id left the store on pre-patch html and
+ * the next patch then edited stale text — a wrong replacement or a
+ * PatchNotFoundError after any restart.
+ */
+describe('adoptReplay — log beats a lagging disk cache', () => {
+  const meta = (op: string, html: string, id = 'art-1', version?: number): any => ({
+    op, id, html, ...version === undefined ? {} : { version },
+    ...op === 'create' ? { title: 'T' } : {},
+  })
+
+  it('adopts the log when the same version carries different html (unsaved patch)', () => {
+    const store = new ArtifactStore()
+    // Disk cache: v1 plus an older working copy.
+    store.restore('art-1', { html: '<p>stale</p>', versions: [{ version: 1, html: '<p>v1</p>', time: 1 }] })
+    // Log: same version 1, but a patch moved the working copy on.
+    for (const [id, snap] of rebuildFromMetas([meta('create', '<p>v1</p>', 'art-1', 1), meta('patch', '<p>patched</p>')])) {
+      store.adoptReplay(id, snap)
+    }
+    expect(store.get('art-1').html).toBe('<p>patched</p>')
+    // ...and the next patch now operates on the CURRENT html, not the stale one.
+    const result = store.patch('art-1', '<p>patched</p>', '<p>next</p>', false, 1 << 20)
+    expect(result.count).toBe(1)
+    expect(store.get('art-1').html).toBe('<p>next</p>')
+  })
+
+  it('does NOT let a partial log erase history the disk still holds', () => {
+    const store = new ArtifactStore()
+    store.restore('art-1', {
+      html: '<p>v3</p>',
+      versions: [
+        { version: 1, html: '<p>v1</p>', time: 1 },
+        { version: 2, html: '<p>v2</p>', time: 2 },
+        { version: 3, html: '<p>v3</p>', time: 3 },
+      ],
+    })
+    // A pruned/partial log with only version 1 must not win.
+    const adopted = store.adoptReplay('art-1', {
+      html: '<p>v1</p>',
+      versions: [{ version: 1, html: '<p>v1</p>', time: 1 }],
+    })
+    expect(adopted).toBe(false)
+    expect(store.versionsOf('art-1').map(v => v.version)).toEqual([1, 2, 3])
+  })
+
+  it('reports no adoption when the log matches the store exactly', () => {
+    const store = new ArtifactStore()
+    store.restore('art-1', { html: '<p>x</p>', versions: [{ version: 1, html: '<p>x</p>', time: 1 }] })
+    expect(store.adoptReplay('art-1', { html: '<p>x</p>', versions: [{ version: 1, html: '<p>x</p>', time: 1 }] })).toBe(false)
+  })
+
+  it('adopts a tombstone from the log (destroy must survive replay)', () => {
+    const store = new ArtifactStore()
+    store.restore('art-1', { html: '<p>x</p>', versions: [{ version: 1, html: '<p>x</p>', time: 1 }] })
+    const adopted = store.adoptReplay('art-1', {
+      html: '<p>x</p>', deleted: true, versions: [{ version: 1, html: '<p>x</p>', time: 1 }],
+    })
+    expect(adopted).toBe(true)
+    expect(store.isLive('art-1')).toBe(false)
+    expect(store.has('art-1')).toBe(true)
+  })
+
+  it('restores an id the store lacks (the simple cold case)', () => {
+    const store = new ArtifactStore()
+    expect(store.adoptReplay('art-9', { html: '<p>n</p>', versions: [{ version: 1, html: '<p>n</p>', time: 1 }] })).toBe(true)
+    expect(store.get('art-9').html).toBe('<p>n</p>')
+  })
+
+  it('size() counts tombstones so a replay watermark is not re-walked', () => {
+    // list() hides tombstones; keying the skip decision off list().length made
+    // an all-destroyed session replay its whole log on every `list` call.
+    const store = new ArtifactStore()
+    store.restore('art-1', { html: '<p>x</p>', deleted: true, versions: [{ version: 1, html: '<p>x</p>', time: 1 }] })
+    expect(store.list()).toEqual([])
+    expect(store.size()).toBe(1)
+  })
+})

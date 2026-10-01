@@ -233,9 +233,16 @@ function ensureFromLog(agent: Agent, store: ArtifactStore, id: string | undefine
     // A full replay walks every event of the session; skip it while the log
     // has not grown since the last replay that already populated this store
     // (`list` is called often, and sessions reach tens of thousands of events).
+    //
+    // `store.size()`, NOT `store.list().length`: list() hides tombstones, so a
+    // session whose artifacts were all destroyed re-ran the full walk on every
+    // single `list` call. Tying the watermark to the log length AND a populated
+    // store is still correct because a store rebuilt from log content cannot
+    // have entries the log lacks — the disk cache populates it before this
+    // runs, and the watermark is only recorded after a walk over that log.
     const seen = replayedThrough.get(agent)
-    if (seen === logLength && logLength >= 0 && store.list().length > 0) return
-  } else if (id === undefined || store.has(id)) {
+    if (seen === logLength && logLength >= 0 && store.size() > 0) return
+  } else if (id === undefined) {
     return
   }
   const metas: ArtifactMetaLike[] = []
@@ -267,11 +274,11 @@ function ensureFromLog(agent: Agent, store: ArtifactStore, id: string | undefine
   }
   for (const [rebuiltId, snapshot] of rebuildFromMetas(metas)) {
     if (!all && rebuiltId !== id) continue
-    // `has` (not `isLive`): a soft-deleted artifact is ALREADY present as a
-    // tombstone, and re-restoring it would both overwrite that state and — in
-    // the old code, where every restore wrote to disk — rewrite its files on
-    // every single replay.
-    if (!store.has(rebuiltId)) store.restore(rebuiltId, snapshot)
+    // adoptReplay (not a bare `if (!has) restore`): the log is authoritative
+    // for CONTENT, so an artifact already present from the disk cache must
+    // still be updated when the log is newer. Skipping it kept the store on
+    // stale html and the next patch then edited pre-patch text.
+    store.adoptReplay(rebuiltId, snapshot)
   }
   if (all && logLength >= 0) replayedThrough.set(agent, logLength)
 }

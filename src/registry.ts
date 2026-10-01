@@ -423,6 +423,59 @@ export class ArtifactStore {
     return state !== undefined && state.deleted !== true
   }
 
+  /** How many artifacts this store holds, tombstones included. Lets the caller
+   *  tell "already replayed into a populated store" from "replay produced
+   *  nothing", which decides whether a full log walk can be skipped. */
+  size(): number {
+    return this.states.size
+  }
+
+  /**
+   * Fold a snapshot reconstructed from the session log into this store,
+   * keeping whichever side is NEWER.
+   *
+   * Why this exists (the stale-patch bug): boot restores artifacts from the
+   * disk cache, then log replay used to skip any id the store already had —
+   * `if (!store.has(id)) store.restore(...)`. The disk cache is written on
+   * mutation, so it can lag the log, and the log always wins on content: every
+   * artifact op projects its FULL html into the log. Skipping meant a session
+   * reopened after an unsaved patch kept editing the pre-patch html — the next
+   * patch matched stale text (wrong replacement, or PatchNotFoundError).
+   *
+   * The log is authoritative because a session log is append-only and durable;
+   * the disk directory is a derived cache (it exists so artifacts survive log
+   * loss, not to be the source of truth). The one case where the disk is kept
+   * is a log that carries FEWER versions than the store, which means the log
+   * is partial rather than newer — then adopting it would lose history.
+   * @param id - the artifact id.
+   * @param snapshot - the log-derived state.
+   * @returns whether the store adopted the incoming snapshot.
+   */
+  adoptReplay(id: string, snapshot: { html: string; title?: string; interactive?: boolean; deleted?: boolean; versions: ArtifactVersion[] }): boolean {
+    const existing = this.states.get(id)
+    if (existing === undefined) {
+      this.restore(id, snapshot)
+      return true
+    }
+    const have = existing.versions[existing.versions.length - 1]?.version ?? 0
+    const incoming = snapshot.versions[snapshot.versions.length - 1]?.version ?? 0
+    // The log is behind the disk cache: a partial/pruned log must not erase
+    // history the cache still holds.
+    if (incoming < have) return false
+    if (
+      incoming === have
+      && existing.html === snapshot.html
+      && (existing.deleted === true) === (snapshot.deleted === true)
+    ) {
+      return false
+    }
+    // Equal version numbers with different html is the interesting case: a
+    // `patch` does not bump any version, so the log carrying different content
+    // at the same version means it holds a later unsaved patch.
+    this.restore(id, snapshot)
+    return true
+  }
+
   /**
    * Restore an artifact reconstructed from the durable session log or from the
    * disk cache (server restarts lose the in-memory store; the log is the
