@@ -183,6 +183,10 @@ function ImportPicker({ onClose }: { onClose: () => void }) {
     ).then(ok => {
       if (ok) {
         onClose()
+        // The import minted its artifact SERVER-SIDE, so this client's index is
+        // stale by definition. Without this the canvas kept showing the old
+        // contents after a successful import until a full page reload.
+        canvasBridge.onImported()
         return
       }
       setPhase('fail')

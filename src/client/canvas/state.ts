@@ -862,9 +862,44 @@ class CanvasBridge {
     this.refreshHostList()
   }
 
-  private refreshHostList(): void {
+  /**
+   * Re-read the host index after an IMPORT, which mints its artifact SERVER-SIDE.
+   *
+   * `refreshHostList` latches after one successful read (the index exists to
+   * cover a truncated window, and re-reading it on every render would be
+   * wasteful), so a newly imported artifact was invisible until a page reload —
+   * the canvas kept showing the old contents right after the user imported
+   * something. An import is precisely the case where the client knows its index
+   * is stale, so it clears the latch and re-reads, then OPENS whatever is new.
+   *
+   * The minted id is deliberately unknowable here: the import command picks it
+   * server-side (that is why the command wakes the model with it). So the
+   * selection is computed by DIFFING the artifact ids instead of guessing one.
+   */
+  onImported(): void {
+    const known = new Set(this.timelinesValue.keys())
+    this.hostListFetched = false
+    this.refreshHostList(() => {
+      // Newest first, so an import into a session that already had artifacts
+      // still lands on the imported one rather than an arbitrary new row.
+      const fresh = this.orderValue.find(candidate => !known.has(candidate))
+      if (fresh !== undefined) {
+        // `open(id)` both reveals the tab and selects the artifact.
+        this.open(fresh)
+        return
+      }
+      // Nothing new to select: the artifact was already in the index (e.g. the
+      // window scan beat the import), so just republish the refreshed state.
+      this.publish()
+    })
+  }
+
+  private refreshHostList(onApplied?: () => void): void {
     const id = activeSessionId
-    if (id === undefined || this.hostListFetched) return
+    if (id === undefined || this.hostListFetched) {
+      onApplied?.()
+      return
+    }
     this.hostListFetched = true
     void fetch(`/artifact/api/list?sessionId=${encodeURIComponent(id)}`)
       .then(response => response.ok ? response.json() : undefined)
@@ -876,10 +911,14 @@ class CanvasBridge {
         // index exists to fix). Only a SUCCESSFUL, non-empty read latches.
         if (!Array.isArray((body as { artifacts?: unknown[] } | undefined)?.artifacts)) {
           this.hostListFetched = false
+          onApplied?.()
           return
         }
         const artifacts = (body as { ok?: boolean; artifacts?: unknown[] } | undefined)?.artifacts
-        if (!Array.isArray(artifacts)) return
+        if (!Array.isArray(artifacts)) {
+          onApplied?.()
+          return
+        }
         for (const raw of artifacts) {
           if (raw === null || typeof raw !== 'object') continue
           const entry = raw as {
@@ -907,6 +946,7 @@ class CanvasBridge {
           // A legitimately empty session is fine to re-ask (cheap), so a later
           // artifact — or a route that came up late — still gets picked up.
           this.hostListFetched = false
+          onApplied?.()
           return
         }
         this.applyHostTimelines()
@@ -914,10 +954,12 @@ class CanvasBridge {
           .sort((a, b) => b.lastSeq - a.lastSeq || b.lastTime - a.lastTime || (a.title ?? a.id).localeCompare(b.title ?? b.id))
           .map(timeline => timeline.id)
         this.publish()
+        onApplied?.()
       })
       .catch(() => {
         // offline / headless / route not yet registered — allow a later retry.
         this.hostListFetched = false
+        onApplied?.()
       })
   }
 
