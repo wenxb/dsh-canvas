@@ -7,16 +7,11 @@
  * resets the working copy to a previously saved version. Every mutation op
  * projects the full current HTML through `output.presentationMeta`, so the
  * GUI renders a live sandboxed preview and the session log replays it without
- * this process state. The `card: 'artifact'` render intent is plugin-owned:
- * `presentationMeta` is what actually reaches the browser half (it rides the
+ * this process state. `presentationMeta` is the ONLY render path: it rides the
  * tool-result EVENT as `data.meta`, which the client's `tool.call.toolview`
- * reads). `presentResult` below feeds only a hypothetical HOST consumer: DSH
- * states that presentCall/presentResult values never enter the Client, so the
- * browser never sees `card: 'artifact'` — the client discriminates on the raw
- * `op` vocabulary instead. Kept for host-side consumers; not the render path.
- * The core `ToolResultView` union does not know the card, so the return is a
- * deliberate cast — runtime validation is the client's documented
- * generic-card fallback.
+ * reads and discriminates by the raw `op` vocabulary. There is deliberately no
+ * `presentResult` — DSH keeps host `presentCall`/`presentResult` values off the
+ * Client, so such a view would have no consumer this side of the boundary.
  *
  * User-side escape hatches ride slash commands that inject a plugin notice
  * into the agent's next request context: `/artifact-submit` (interaction
@@ -30,7 +25,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-commands'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
-import { defineTool, type ToolResultView } from '@deepseek-ai/dsh-tools'
+import { defineTool } from '@deepseek-ai/dsh-tools'
 type JsonValue = string | number | boolean | null | { [key: string]: JsonValue } | JsonValue[]
 import {
   parseRevertRequest,
@@ -103,9 +98,6 @@ interface DestroyValue { op: 'destroy'; id: string; removed: true }
 interface ListValue { op: 'list'; dir?: string; artifacts: { id: string; version: number; bytes: number; title?: string }[] }
 
 type ArtifactValue = CreateValue | PatchValue | SaveValue | RevertValue | InteractiveValue | ReadValue | DestroyValue | ListValue
-
-/** One listable artifact summary as the model-facing result carries it. */
-interface ArtifactSummaryWire { id: string; version: number; bytes: number; title?: string }
 
 function isArtifactValue(value: unknown): value is ArtifactValue {
   if (value === null || typeof value !== 'object') return false
@@ -727,64 +719,14 @@ export function apply(ctx: Context, config: Config = {}): void {
         default: return undefined
       }
     },
-    // NOTE: not the browser render path — see the module doc. The client reads
-    // the raw `meta` (via presentationMeta → event data.meta) and does its own
-    // op-based discrimination; this view is for host-side consumers only.
-    presentResult(_args, result): ToolResultView | undefined {
-      if (result.isError) return undefined
-      const meta = result.meta
-      if (meta === null || typeof meta !== 'object') return undefined
-      const candidate = meta as Record<string, unknown>
-      if (typeof candidate.op !== 'string') return undefined
-      switch (candidate.op) {
-        case 'create':
-        case 'patch':
-        case 'save':
-        case 'revert':
-        case 'read': {
-          const { id, version, html, title, applied, truncated, unchanged, interactive } = candidate
-          if (typeof id !== 'string' || typeof version !== 'number' || typeof html !== 'string') return undefined
-          return {
-            card: 'artifact', op: candidate.op, id, version, html,
-            ...typeof title === 'string' ? { title } : {},
-            ...typeof applied === 'number' ? { applied } : {},
-            ...typeof truncated === 'boolean' ? { truncated } : {},
-            ...typeof unchanged === 'boolean' ? { unchanged } : {},
-            ...typeof interactive === 'boolean' ? { interactive } : {},
-          } as unknown as ToolResultView
-        }
-        case 'interactive': {
-          const { id, version, interactive, title } = candidate
-          if (typeof id !== 'string' || typeof interactive !== 'boolean') return undefined
-          return {
-            card: 'artifact', op: 'interactive', id,
-            ...typeof version === 'number' ? { version } : {},
-            interactive,
-            ...typeof title === 'string' ? { title } : {},
-          } as unknown as ToolResultView
-        }
-        case 'destroy': {
-          if (typeof candidate.id !== 'string') return undefined
-          return { card: 'artifact', op: 'destroy', id: candidate.id } as unknown as ToolResultView
-        }
-        case 'list': {
-          if (!Array.isArray(candidate.artifacts)) return undefined
-          const artifacts: ArtifactSummaryWire[] = []
-          for (const entry of candidate.artifacts) {
-            if (entry === null || typeof entry !== 'object') return undefined
-            const { id, version, bytes, title } = entry as Record<string, unknown>
-            if (typeof id !== 'string' || typeof version !== 'number' || typeof bytes !== 'number') return undefined
-            artifacts.push({ id, version, bytes, ...typeof title === 'string' ? { title } : {} })
-          }
-          return {
-            card: 'artifact', op: 'list',
-            ...typeof candidate.dir === 'string' && candidate.dir !== '' ? { dir: candidate.dir } : {},
-            artifacts,
-          } as unknown as ToolResultView
-        }
-        default:
-          return undefined
-      }
-    },
+    // NO `presentResult`. This was ~55 lines building a tagged `card: 'artifact'`
+    // view that nothing consumed: it is the browser half that renders the card,
+    // and DSH keeps Host `presentCall`/`presentResult` values off the Client
+    // (dsh-client-ui-tool README). The card the user actually sees comes from
+    // `output.presentationMeta` above, which projects the raw meta onto the
+    // `tool/result` event; the client discriminates on `op` itself
+    // (src/client/contract.ts:artifactCardModel). Removed rather than kept as a
+    // speculative host-consumer view — it needed `as unknown as ToolResultView`
+    // casts to exist at all, which is the tell that it had no real consumer.
   }))
 }

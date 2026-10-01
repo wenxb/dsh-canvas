@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/dsh-html-artifact",
-  "description": "DSH HTML-artifact plugin with a Gemini-canvas-style panel: an `artifact` tool (create/patch/save/revert/read/destroy/list) with EXPLICIT versioning — patch edits the working copy, `save` snapshots it as a new version, `revert` rolls back. Requires the dsh-better-sidebar peer: documents render as a native workbench tab (panes/splits/float/resize) that auto-opens on new versions, navigates 前进/后退 through saved versions, goes fullscreen, and streams generation live; the chat renders only a compact card that opens the canvas.",
+  "description": "DSH HTML-artifact plugin with a Gemini-canvas-style panel: an `artifact` tool (create/patch/save/revert/read/destroy/list) with EXPLICIT versioning \u2014 patch edits the working copy, `save` snapshots it as a new version, `revert` rolls back. Requires the dsh-better-sidebar peer: documents render as a native workbench tab (panes/splits/float/resize) that auto-opens on new versions, navigates \u524d\u8fdb/\u540e\u9000 through saved versions, goes fullscreen, and streams generation live; the chat renders only a compact card that opens the canvas.",
   "version": "0.2.0",
   "private": true,
   "type": "module",
@@ -19,8 +19,7 @@
     "lib",
     "src",
     "tests",
-    "cordis.patch.yml",
-    "dsh.plugin.json"
+    "cordis.patch.yml"
   ],
   "scripts": {
     "build": "tsdown",

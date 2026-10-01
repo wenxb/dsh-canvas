@@ -22,7 +22,7 @@
  * cannot cause the rest of an operation's writes to be skipped.
  * @module
  */
-import { mkdirSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { ArtifactVersion } from './registry.ts'
@@ -54,7 +54,13 @@ export interface ArtifactPersistence {
   writeVersion(id: string, version: ArtifactVersion): void
   /** Write the manifest (`<id>.json`) — metadata only, never a body. */
   writeManifest(manifest: ArtifactManifest): void
-  /** Delete every file belonging to one artifact. */
+  /** Delete every file belonging to one artifact.
+   *
+   *  Deliberately UNUSED today: `destroy` is a soft delete (tombstone in the
+   *  manifest, bodies left on disk for manual recovery). Kept as the seam's
+   *  explicit hard-delete capability so a future "清理" affordance does not
+   *  have to reach into the filesystem itself. Do not call it from a GC —
+   *  session liveness cannot be determined reliably (see apply() in index.ts). */
   remove(id: string): void
   /** Load every persisted artifact (missing/corrupt files are skipped). */
   loadAll(): PersistedArtifact[]
@@ -87,32 +93,6 @@ export function persistDirFor(root: string, sessionId: string): string {
 
 function safeSessionDir(root: string, sessionId: string): string {
   return persistDirFor(root, sessionId)
-}
-
-/**
- * Garbage-collect artifact directories whose session no longer exists in the
- * persistence index (hard-deleted from the 回收站; archived-but-recoverable
- * sessions stay). Returns the removed session ids.
- * Errors are per-dir swallowed — the GC must never block the plugin boot.
- */
-export function gcOrphanArtifacts(root: string, aliveSessionIds: ReadonlySet<string>): string[] {
-  let dirs: string[]
-  try {
-    dirs = readdirSync(root, { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name)
-  } catch {
-    return []
-  }
-  const removed: string[] = []
-  for (const dir of dirs) {
-    if (aliveSessionIds.has(dir)) continue
-    try {
-      rmSync(join(root, dir), { recursive: true, force: true })
-      removed.push(dir)
-    } catch (error) {
-      console.error(`[dsh-html-artifact] gc failed for ${dir}:`, error)
-    }
-  }
-  return removed
 }
 
 /**

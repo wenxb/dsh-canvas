@@ -152,21 +152,6 @@ describe('artifact disk persistence', () => {
     expect(manifest.versions[0].bytes).toBe(Buffer.byteLength('<p>12345</p>'))
   })
 
-  it('the session GC removes artifact dirs whose session is gone from persistence — keeps everything alive or archived', () => {
-    const root = mkdtempSync(join(tmpdir(), 'dsh-artifact-gc-'))
-    mkdirSync(join(root, 'session-a'), { recursive: true })
-    mkdirSync(join(root, 'session-b'), { recursive: true })
-    mkdirSync(join(root, 'session-gone'), { recursive: true })
-    const { writeFileSync } = require('node:fs')
-    writeFileSync(join(root, 'session-a', 'art-x.html'), '<p>a</p>')
-    writeFileSync(join(root, 'session-gone', 'art-y.html'), '<p>bye</p>')
-    const { gcOrphanArtifacts } = require('../src/persistence.ts')
-    const removed: string[] = gcOrphanArtifacts(root, new Set(['session-a', 'session-b']))
-    expect(removed).toEqual(['session-gone'])
-    expect(readdirSync(root).sort()).toEqual(['session-a', 'session-b'].sort())
-    rmSync(root, { recursive: true, force: true })
-  })
-
   it('corrupt manifests are skipped, not fatal', () => {
     const { dir: d } = storeInTemp()
     const { writeFileSync, mkdirSync } = require('node:fs')
