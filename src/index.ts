@@ -40,7 +40,7 @@ import {
 } from './interaction.ts'
 import { ArtifactStore, UnknownVersionError, rebuildFromMetas, truncateHtml, type ArtifactMetaLike } from './registry.ts'
 import { DEFAULT_PERSIST_ROOT, makePersister, persistDirFor, type ArtifactPersistence } from './persistence.ts'
-import { LIBRARY_MAX_ARTIFACTS, librarySessionIds, readLibraryArtifact, scanLibrary } from './library.ts'
+import { LIBRARY_MAX_ARTIFACTS, libraryListingPayload, librarySessionIds, libraryVersionsPayload, readLibraryArtifact, scanLibrary } from './library.ts'
 import {
   ARTIFACT_SKILL_BODY,
   ARTIFACT_SKILL_DESCRIPTION,
@@ -627,21 +627,7 @@ export function apply(ctx: Context, config: Config = {}): void {
             reply(404, { ok: false, error: { code: 'not-found', message: 'no such artifact' } })
             return
           }
-          reply(200, {
-            ok: true,
-            artifact: {
-              sessionId: sourceSession,
-              artifactId,
-              ...snapshot.title === undefined ? {} : { title: snapshot.title },
-              interactive: snapshot.interactive === true,
-              bytes: bytesOf(snapshot.html),
-              versions: snapshot.versions.map(entry => ({
-                version: entry.version,
-                time: entry.time,
-                bytes: bytesOf(entry.html),
-              })),
-            },
-          })
+          reply(200, libraryVersionsPayload(sourceSession, artifactId, snapshot))
           return
         }
         // First step: sessions and their importable artifacts.
@@ -652,21 +638,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           limit: LIBRARY_MAX_ARTIFACTS,
           ...titles.size === 0 ? {} : { titles },
         })
-        reply(200, {
-          ok: true,
-          sessions: sessions.map(session => ({
-            sessionId: session.sessionId,
-            ...session.title === undefined ? {} : { title: session.title },
-            artifacts: session.artifacts.map(artifact => ({
-              artifactId: artifact.artifactId,
-              ...artifact.title === undefined ? {} : { title: artifact.title },
-              interactive: artifact.interactive === true,
-              versions: artifact.versionCount,
-              bytes: artifact.bytes,
-              ...artifact.origin === undefined ? {} : { origin: artifact.origin },
-            })),
-          })),
-        })
+        reply(200, libraryListingPayload(sessions))
       } catch (error) {
         reply(500, { ok: false, error: { code: 'internal', message: error instanceof Error ? error.message : String(error) } })
       }

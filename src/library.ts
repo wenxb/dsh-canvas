@@ -170,3 +170,88 @@ export function librarySessionIds(root: string): string[] {
     return []
   }
 }
+/**
+ * The `/artifact/api/library` LISTING payload.
+ *
+ * EXTRACTED FROM THE ROUTE so the host's response shape and the client's parser
+ * can be tested against each other. They are a genuine contract across a wire
+ * boundary with no compiler between them: a field renamed on one side is
+ * invisible to both sides' unit tests and shows up only as an empty picker.
+ *
+ * Metadata only — deliberately no HTML. The picker shows a title and a size; a
+ * library of hundreds of artifacts must not ship their full source to draw a
+ * list.
+ * @param sessions - the scanned library.
+ * @returns the JSON body the route sends.
+ */
+export function libraryListingPayload(sessions: LibrarySession[]): {
+  ok: true
+  sessions: {
+    sessionId: string
+    title?: string
+    artifacts: {
+      artifactId: string
+      title?: string
+      interactive: boolean
+      versions: number
+      bytes: number
+      origin?: { sessionId: string; artifactId: string }
+    }[]
+  }[]
+} {
+  return {
+    ok: true,
+    sessions: sessions.map(session => ({
+      sessionId: session.sessionId,
+      ...session.title === undefined ? {} : { title: session.title },
+      artifacts: session.artifacts.map(artifact => ({
+        artifactId: artifact.artifactId,
+        ...artifact.title === undefined ? {} : { title: artifact.title },
+        interactive: artifact.interactive === true,
+        versions: artifact.versionCount,
+        bytes: artifact.bytes,
+        ...artifact.origin === undefined ? {} : { origin: artifact.origin },
+      })),
+    })),
+  }
+}
+
+/**
+ * The `/artifact/api/library?...&artifactId=` VERSION payload — the picker's
+ * second step. Same wire-contract reasoning as {@link libraryListingPayload}.
+ * @param sessionId - the source session.
+ * @param artifactId - the source artifact.
+ * @param snapshot - the artifact read from the source session.
+ * @returns the JSON body the route sends.
+ */
+export function libraryVersionsPayload(
+  sessionId: string,
+  artifactId: string,
+  snapshot: PersistedArtifact,
+): {
+  ok: true
+  artifact: {
+    sessionId: string
+    artifactId: string
+    title?: string
+    interactive: boolean
+    bytes: number
+    versions: { version: number; time: number; bytes: number }[]
+  }
+} {
+  return {
+    ok: true,
+    artifact: {
+      sessionId,
+      artifactId,
+      ...snapshot.title === undefined ? {} : { title: snapshot.title },
+      interactive: snapshot.interactive === true,
+      bytes: Buffer.byteLength(snapshot.html, 'utf-8'),
+      versions: snapshot.versions.map(entry => ({
+        version: entry.version,
+        time: entry.time,
+        bytes: Buffer.byteLength(entry.html, 'utf-8'),
+      })),
+    },
+  }
+}
