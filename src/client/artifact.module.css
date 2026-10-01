@@ -1,6 +1,21 @@
 /* dsh-html-artifact browser styles: the compact in-chat card and the
- * frame-wide canvas panel. Host token vars (--surface-*, --text-*,
- * --border, --accent) come from the app shell theme. */
+ * frame-wide canvas panel.
+ *
+ * THEME: every colour is a host theme token (`--dsw-alias-*`), so the plugin
+ * follows the app's light/dark switch with no local dark-mode rules — a
+ * `prefers-color-scheme` block here would be WRONG, because the host theme is
+ * an explicit user preference (ui-theme.preference), not the OS setting.
+ *
+ * Do NOT reintroduce those names in THIS file. They look host-provided there
+ * only because `sandbox.ts` defines that same 7-token set for the artifact
+ * iframe (`ARTIFACT_THEME_VARS` → `themeRootCss`), so the names resolve
+ * *inside a preview document* but never in the host page. The mix-up is what
+ * shipped the bug: the canvas chrome and the sandbox contract were using one
+ * vocabulary for two different scopes. Whether any host version ever defined
+ * them is unresolved — the artifact panel has always been a better-sidebar
+ * tab, so no host ancestor is expected to have supplied them at any point.
+ * Keep token names exact; the syntax-highlight palette at the bottom is the
+ * one deliberate exception (see its comment). */
 
 /* ------------------------------------------------ in-chat compact card */
 
@@ -12,15 +27,15 @@
   box-sizing: border-box;
   min-width: 0;
   padding: 7px 10px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 8px;
-  background: var(--surface-1, rgba(127, 127, 127, 0.05));
+  background: var(--dsw-alias-bg-layer-1);
   cursor: pointer;
   user-select: none;
 }
 
 .row:hover {
-  border-color: var(--accent, #185fa5);
+  border-color: var(--dsw-alias-brand-primary);
 }
 
 .rowMuted {
@@ -35,7 +50,7 @@
   width: 22px;
   height: 22px;
   flex: none;
-  color: var(--text-secondary);
+  color: var(--dsw-alias-label-secondary);
 }
 
 .rowMain {
@@ -49,7 +64,7 @@
 .rowTitle {
   font-size: 12.5px;
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--dsw-alias-label-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -57,7 +72,7 @@
 
 .rowSub {
   font-size: 11px;
-  color: var(--text-muted);
+  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary));
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -75,16 +90,16 @@
   align-items: center;
   gap: 4px;
   font-size: 11px;
-  color: var(--text-secondary);
+  color: var(--dsw-alias-label-secondary);
   background: transparent;
-  border: 1px solid var(--border);
+  border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 6px;
   padding: 2px 8px;
   cursor: pointer;
 }
 
 .rowBtn:hover {
-  background: var(--surface-2, rgba(127, 127, 127, 0.08));
+  background: var(--dsw-alias-bg-layer-2);
 }
 
 .openHint {
@@ -92,7 +107,7 @@
   align-items: center;
   gap: 4px;
   font-size: 11px;
-  color: var(--text-muted);
+  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary));
   white-space: nowrap;
 }
 
@@ -101,7 +116,7 @@
   width: 8px;
   height: 8px;
   border-radius: 999px;
-  background: var(--accent, #185fa5);
+  background: var(--dsw-alias-brand-primary);
   animation: dshArtifactPulse 1.2s ease-in-out infinite;
 }
 
@@ -115,7 +130,7 @@
 .canvas {
   display: flex;
   flex-direction: column;
-  background: var(--surface-0, #ffffff);
+  background: var(--dsw-alias-bg-base);
   width: 100%;
   height: 100%;
   min-width: 0;
@@ -128,7 +143,7 @@
  * float over the full-height column) stay clear without any reserved strip. */
 .canvasDock {
   position: relative;
-  border-left: 1px solid var(--border);
+  border-left: 1px solid var(--dsw-alias-border-l1);
 }
 
 .canvasHead {
@@ -136,8 +151,8 @@
   flex-direction: column;
   gap: 4px;
   padding: 8px 12px 6px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface-1, rgba(127, 127, 127, 0.04));
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-layer-1);
 }
 
 .headRow {
@@ -151,16 +166,16 @@
 .artifactSelect {
   max-width: 200px;
   font-size: 12px;
-  color: var(--text-primary);
+  color: var(--dsw-alias-label-primary);
   background: transparent;
-  border: 1px solid var(--border);
+  border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 6px;
   padding: 3px 6px;
 }
 
 .headNote {
   font-size: 12px;
-  color: var(--text-muted);
+  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary));
 }
 
 .navCluster {
@@ -175,15 +190,15 @@
   justify-content: center;
   width: 26px;
   height: 26px;
-  color: var(--text-secondary);
+  color: var(--dsw-alias-label-secondary);
   background: transparent;
-  border: 1px solid var(--border);
+  border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 6px;
   cursor: pointer;
 }
 
 .iconBtn:hover:not(:disabled) {
-  background: var(--surface-2, rgba(127, 127, 127, 0.08));
+  background: var(--dsw-alias-bg-layer-2);
 }
 
 .iconBtn:disabled {
@@ -193,7 +208,7 @@
 
 .count {
   font-size: 11px;
-  color: var(--text-muted);
+  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary));
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -203,8 +218,8 @@
   align-items: center;
   gap: 6px;
   font-size: 11px;
-  color: var(--text-secondary);
-  border: 1px solid var(--border);
+  color: var(--dsw-alias-label-secondary);
+  border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 999px;
   padding: 1px 9px;
   white-space: nowrap;
@@ -213,8 +228,8 @@
 .dirtyDot {
   font-style: normal;
   font-size: 10px;
-  color: #b45309;
-  background: rgba(180, 83, 9, 0.12);
+  color: var(--dsw-alias-state-warn-primary);
+  background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 14%, transparent);
   border-radius: 999px;
   padding: 0 6px;
 }
@@ -224,9 +239,9 @@
   align-items: center;
   gap: 5px;
   font-size: 12px;
-  color: var(--text-primary);
+  color: var(--dsw-alias-label-primary);
   background: transparent;
-  border: 1px solid var(--border);
+  border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 6px;
   padding: 4px 10px;
   cursor: pointer;
@@ -234,7 +249,7 @@
 }
 
 .textBtn:hover:not(:disabled) {
-  background: var(--surface-2, rgba(127, 127, 127, 0.08));
+  background: var(--dsw-alias-bg-layer-2);
 }
 
 .textBtn:disabled {
@@ -257,21 +272,21 @@
   align-items: center;
   gap: 8px;
   font-size: 11.5px;
-  color: var(--text-secondary);
+  color: var(--dsw-alias-label-secondary);
   padding: 5px 12px;
-  border-bottom: 1px dashed var(--border);
-  background: var(--surface-1, rgba(127, 127, 127, 0.04));
+  border-bottom: 1px dashed var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-layer-1);
 }
 
 .warnBar {
-  color: #b45309;
+  color: var(--dsw-alias-state-warn-primary);
 }
 
 .canvasFrame {
   flex: 1 1 auto;
   width: 100%;
   border: 0;
-  background: var(--surface-0, #ffffff);
+  background: var(--dsw-alias-bg-base);
   display: block;
   min-height: 0;
 }
@@ -283,8 +298,8 @@
   min-height: 0;
   overflow: auto;
   padding: 12px 14px;
-  background: var(--surface-0, #ffffff);
-  color: var(--text-primary);
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
   line-height: 1.55;
@@ -294,7 +309,16 @@
 }
 
 /* highlight.js token palette — github-light / github-dark, switched on the
-   host's color-scheme so the panel follows the app theme. */
+   host's color-scheme so the panel follows the app theme.
+ *
+ * DELIBERATE EXCEPTION to the token rule at the top of this file: a *syntax*
+ * palette is not chrome. The host exposes no token for "keyword red" or
+ * "string blue", and mapping them onto brand/label tokens would collapse the
+ * distinctions the highlighter exists to draw. `light-dark()` is the correct
+ * tool here — it follows `color-scheme`, which the host sets on <html> from
+ * the same ui-theme preference (dsh-client-ui-layout does
+ * `document.documentElement.style.colorScheme = scheme`). These therefore DO
+ * follow the user's theme, just through the other mechanism. Keep them. */
 .srcPre :global(.hljs-comment),
 .srcPre :global(.hljs-quote) { color: light-dark(#6a737d, #8b949e); font-style: italic }
 .srcPre :global(.hljs-doctag),
@@ -333,7 +357,7 @@
   align-items: center;
   justify-content: center;
   gap: 6px;
-  color: var(--text-secondary);
+  color: var(--dsw-alias-label-secondary);
   font-size: 13px;
   padding: 24px;
   text-align: center;
@@ -341,7 +365,7 @@
 
 .emptyHint {
   font-size: 12px;
-  color: var(--text-muted);
+  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary));
   max-width: 420px;
 }
 
@@ -362,54 +386,54 @@
   width: 100%;
   padding: 12px 14px;
   text-align: left;
-  color: var(--text-primary);
-  background: var(--surface-1, #ffffff0a);
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-1);
   /* The ONLY change vs the original ghost card: a border you can actually see. */
-  border: 1px solid light-dark(#d9dfe6, #414954);
+  border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 10px;
   cursor: pointer;
-  box-shadow: 0 1px 2px rgba(0,0,0,.04);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--dsw-alias-label-primary) 6%, transparent);
   transition: border-color .15s, box-shadow .15s, transform .05s;
 }
 .pickCard:hover {
-  border-color: var(--accent, #185fa5);
-  background: var(--surface-2, #ffffff14);
-  box-shadow: 0 4px 14px rgba(21,55,105,.12);
+  border-color: var(--dsw-alias-brand-primary);
+  background: var(--dsw-alias-bg-layer-2);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--dsw-alias-brand-primary) 18%, transparent);
 }
 .pickCard:active { transform: translateY(1px) }
 .pickCardTop { display: flex; align-items: center; gap: 8px; min-width: 0 }
 .pickCardIcon {
   flex: none; width: 28px; height: 28px; border-radius: 8px;
-  background: var(--surface-2, #ffffff14);
-  border: 1px solid light-dark(#d9dfe6, #414954);
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid var(--dsw-alias-border-l1);
   display: inline-flex; align-items: center; justify-content: center;
-  color: var(--accent, #185fa5);
+  color: var(--dsw-alias-brand-primary);
 }
 .pickCardTitle { flex: 1; min-width: 0; font-size: 13px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .pickCardVer {
-  flex: none; font-size: 11px; color: var(--text-secondary);
-  border: 1px solid light-dark(#d9dfe6, #414954); border-radius: 999px; padding: 1px 8px;
+  flex: none; font-size: 11px; color: var(--dsw-alias-label-secondary);
+  border: 1px solid var(--dsw-alias-border-l1); border-radius: 999px; padding: 1px 8px;
   font-variant-numeric: tabular-nums;
 }
 .pickCardBottom { display: flex; align-items: center; gap: 8px; min-width: 0 }
-.pickCardId { flex: 1; min-width: 0; color: var(--text-muted); font-size: 11px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-.pickCardDirty { flex: none; color: #b45309; background: #b453091c; border-radius: 999px; padding: 0 8px; font-size: 10.5px }
+.pickCardId { flex: 1; min-width: 0; color: var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary)); font-size: 11px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.pickCardDirty { flex: none; color: var(--dsw-alias-state-warn-primary); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent); border-radius: 999px; padding: 0 8px; font-size: 10.5px }
 
 /* Reopened-tab picker caption */
-.pickCardHint { margin: 0 0 4px; font-size: 12.5px; color: var(--text-secondary) }
+.pickCardHint { margin: 0 0 4px; font-size: 12.5px; color: var(--dsw-alias-label-secondary) }
 
 .miniBtn {
   font-size: 11px;
-  color: var(--text-primary);
+  color: var(--dsw-alias-label-primary);
   background: transparent;
-  border: 1px solid var(--border);
+  border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 6px;
   padding: 1px 8px;
   cursor: pointer;
 }
 
 .miniBtn:hover {
-  background: var(--surface-2, rgba(127, 127, 127, 0.08));
+  background: var(--dsw-alias-bg-layer-2);
 }
 
 .pending {
@@ -419,7 +443,7 @@
   align-items: center;
   justify-content: center;
   gap: 6px;
-  color: var(--text-secondary);
+  color: var(--dsw-alias-label-secondary);
   font-size: 13px;
   text-align: center;
 }
@@ -431,7 +455,7 @@
   align-items: center;
   justify-content: center;
   gap: 10px;
-  color: var(--text-muted);
+  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary));
   font-size: 12.5px;
   padding: 24px;
   text-align: center;

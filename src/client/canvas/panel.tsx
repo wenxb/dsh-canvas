@@ -22,14 +22,14 @@
  */
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { canvasBridge, submitInteraction, submitRevert, useCanvasState, type CanvasSnapshot } from './state.ts'
-import { buildSandboxedHtmlDocument, hostArtifactTheme } from '../sandbox.ts'
+import { buildSandboxedHtmlDocument, useArtifactTheme } from '../sandbox.ts'
 import { buildStreamingBridgeDocument } from '../stream/bridge.ts'
 import { IconCheck, IconChevronLeft, IconChevronRight, IconCode, IconDownload, IconEye, IconFileCode, IconRefresh, IconRevert, IconSend } from '../icons.tsx'
 import css from '../artifact.module.css'
 import { highlightHtml } from '../highlight.ts'
 
 /** Ask a settled surface's collect bridge for its interaction data. */
-function collectFrame(frame: HTMLIFrameElement | null, resizeId: string, timeoutMs = 2500): Promise<unknown | undefined> {
+function collectFrame(frame: HTMLIFrameElement | null, postMessageId: string, timeoutMs = 2500): Promise<unknown | undefined> {
   const win = frame === null ? undefined : frame.contentWindow
   if (frame === null || win === undefined || win === null) return Promise.resolve(undefined)
   return new Promise((resolve) => {
@@ -45,8 +45,8 @@ function collectFrame(frame: HTMLIFrameElement | null, resizeId: string, timeout
       const data: unknown = event.data
       if (data === null || typeof data !== 'object') return
       const record = data as Record<string, unknown>
-      if (record.type !== 'dsh-artifact-collect-result' || record.id !== resizeId) return
-      // Only OUR frame may answer. `resizeId` is a predictable React useId
+      if (record.type !== 'dsh-artifact-collect-result' || record.id !== postMessageId) return
+      // Only OUR frame may answer. The id is a predictable React useId
       // value, so without this check any other sandboxed artifact iframe on
       // the page could forge a collect result.
       if (event.source !== frame.contentWindow) return
@@ -54,7 +54,7 @@ function collectFrame(frame: HTMLIFrameElement | null, resizeId: string, timeout
     }
     const timer = setTimeout(() => finish(undefined), timeoutMs)
     window.addEventListener('message', onMessage)
-    win.postMessage({ type: 'dsh-artifact-collect', id: resizeId }, '*')
+    win.postMessage({ type: 'dsh-artifact-collect', id: postMessageId }, '*')
   })
 }
 
@@ -98,7 +98,10 @@ function ArtifactPicker({ state }: { state: CanvasSnapshot }) {
  * @param props - state + fullscreen flag.
  */
 function CanvasBody({ state }: { state: CanvasSnapshot }) {
-  const [theme] = useState(hostArtifactTheme)
+  // Live host scheme: switching light/dark re-themes both surfaces via
+  // postMessage instead of remounting, so an artifact's runtime state (a game
+  // in progress, a form half-filled) survives the switch.
+  const theme = useArtifactTheme()
   const [submitPhase, setSubmitPhase] = useState<'idle' | 'busy' | 'ok' | 'fail'>('idle')
   const [revertPhase, setRevertPhase] = useState<'idle' | 'busy' | 'ok' | 'fail'>('idle')
   /** Body view: live preview iframe vs. the raw source of the VIEWED version. */
@@ -112,8 +115,16 @@ function CanvasBody({ state }: { state: CanvasSnapshot }) {
    *  post-submit state reset (a remount re-runs the page's scripts, which is
    *  exactly the artifact's initial state). */
   const [refreshTick, setRefreshTick] = useState(0)
-  const settledResizeId = useId()
-  const streamResizeId = useId()
+  const settledPostId = useId()
+  const streamPostId = useId()
+
+  // Propagate a scheme change to the already-loaded documents. Preferred over
+  // rebuilding srcDoc because a reload re-runs the artifact's scripts and wipes
+  // its state; the bridges rewrite their theme stylesheet in place.
+  useEffect(() => {
+    settledFrameRef.current?.contentWindow?.postMessage({ type: 'dsh-artifact-theme', theme }, '*')
+    streamFrameRef.current?.contentWindow?.postMessage({ type: 'dsh-artifact-theme', theme }, '*')
+  }, [theme])
 
   const timeline = state.selectedId === undefined ? undefined : state.timelines.get(state.selectedId)
   // Live preview whenever a generation is in flight (auto-open OR the user
@@ -122,9 +133,8 @@ function CanvasBody({ state }: { state: CanvasSnapshot }) {
 
   // The persistent stream bridge receives html by postMessage — the iframe
   // never reloads while the model writes.
-  // The panel body owns its height — skip the stream doc's measure probe
-  // (it walks every element on each streamed chunk for nothing).
-  const streamSrcDoc = useMemo(() => buildStreamingBridgeDocument(streamResizeId, theme, { scrollable: true, measure: false }), [streamResizeId, theme])
+  // The panel body owns its height (flex:1), so no document measures itself.
+  const streamSrcDoc = useMemo(() => buildStreamingBridgeDocument(streamPostId, theme, { scrollable: true }), [streamPostId, theme])
   useEffect(() => {
     if (streaming === undefined) return
     streamFrameRef.current?.contentWindow?.postMessage({ type: 'dsh-artifact-stream', html: streaming.html }, '*')
@@ -171,8 +181,8 @@ function CanvasBody({ state }: { state: CanvasSnapshot }) {
         : state.pending.op === 'revert' ? '回退'
           : state.pending.op
   const settledSrcDoc = useMemo(
-    () => displayHtml === undefined ? undefined : buildSandboxedHtmlDocument(displayHtml, settledResizeId, theme, { scrollable: true }),
-    [displayHtml, settledResizeId, theme],
+    () => displayHtml === undefined ? undefined : buildSandboxedHtmlDocument(displayHtml, settledPostId, theme, { scrollable: true }),
+    [displayHtml, settledPostId, theme],
   )
 
   useEffect(() => {
@@ -202,7 +212,7 @@ function CanvasBody({ state }: { state: CanvasSnapshot }) {
       const data: unknown = event.data
       if (data === null || typeof data !== 'object') return
       const record = data as Record<string, unknown>
-      if (record.type !== 'dsh-artifact-submit-intent' || record.id !== settledResizeId) return
+      if (record.type !== 'dsh-artifact-submit-intent' || record.id !== settledPostId) return
       if (event.source !== settledFrameRef.current?.contentWindow) return
       void onSubmit()
     }
@@ -223,7 +233,7 @@ function CanvasBody({ state }: { state: CanvasSnapshot }) {
     submittingRef.current = true
     setSubmitPhase('busy')
     try {
-      const data = await collectFrame(settledFrameRef.current, settledResizeId)
+      const data = await collectFrame(settledFrameRef.current, settledPostId)
       const ok = data === undefined
         ? false
         : await submitInteraction(state.selectedId, timeline?.title, data)
