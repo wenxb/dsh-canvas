@@ -1,19 +1,53 @@
-.surface {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-width: 0;
-}
+/* dsh-html-artifact browser styles: the compact in-chat card and the
+ * frame-wide canvas panel. Host token vars (--surface-*, --text-*,
+ * --border, --accent) come from the app shell theme. */
 
-.toolbar {
+/* ------------------------------------------------ in-chat compact card */
+
+.row {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
+  width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-1, rgba(127, 127, 127, 0.05));
+  cursor: pointer;
+  user-select: none;
 }
 
-.toolbarTitle {
-  font-size: 12px;
+.row:hover {
+  border-color: var(--accent, #185fa5);
+}
+
+.rowMuted {
+  cursor: default;
+  opacity: 0.75;
+}
+
+.rowMark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  color: var(--text-secondary);
+}
+
+.rowMain {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.rowTitle {
+  font-size: 12.5px;
   font-weight: 600;
   color: var(--text-primary);
   overflow: hidden;
@@ -21,16 +55,22 @@
   white-space: nowrap;
 }
 
-.badge {
+.rowSub {
   font-size: 11px;
   color: var(--text-muted);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 1px 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.toolButton {
+.rowActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.rowBtn {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -43,101 +83,21 @@
   cursor: pointer;
 }
 
-.toolButton:hover {
+.rowBtn:hover {
   background: var(--surface-2, rgba(127, 127, 127, 0.08));
 }
 
-.toolButton:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
-.frame {
-  width: 100%;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: transparent;
-  display: block;
-}
-
-.submitBar {
-  display: flex;
+.openHint {
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  border-top: 1px solid var(--border);
-  padding-top: 8px;
-}
-
-.submitBar .toolbarTitle {
-  min-width: 0;
-  flex: 0 1 auto;
-}
-
-.source {
-  margin: 0;
-  padding: 10px 12px;
-  max-height: 320px;
-  overflow: auto;
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--text-primary);
-  background: var(--surface-1, rgba(127, 127, 127, 0.06));
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.list {
-  display: flex;
-  flex-direction: column;
   gap: 4px;
-}
-
-.listRow {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  padding: 4px 0;
-}
-
-.listId {
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
-  color: var(--text-primary);
-}
-
-.listTitle {
-  color: var(--text-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
+  font-size: 11px;
+  color: var(--text-muted);
   white-space: nowrap;
 }
 
-.closed {
-  font-size: 12px;
-  color: var(--text-muted);
-  padding: 4px 0;
-}
-
-.draft {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-width: 720px;
-}
-
-.draftBar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 11px;
-  color: var(--text-muted);
-}
-
-.draftPulse {
+.pulse {
+  display: inline-block;
   width: 8px;
   height: 8px;
   border-radius: 999px;
@@ -145,13 +105,334 @@
   animation: dshArtifactPulse 1.2s ease-in-out infinite;
 }
 
-.draftLabel {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 @keyframes dshArtifactPulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }
+}
+
+/* --------------------------------------------------- the canvas panel */
+
+.canvas {
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-0, #ffffff);
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  box-sizing: border-box;
+}
+
+/* Docked: fills the details column the frame gives us (real layout space).
+ * Both header rows are LEFT-aligned, so the frame's top-right toggles (which
+ * float over the full-height column) stay clear without any reserved strip. */
+.canvasDock {
+  position: relative;
+  border-left: 1px solid var(--border);
+}
+
+.canvasHead {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px 6px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-1, rgba(127, 127, 127, 0.04));
+}
+
+.headRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  width: 100%;
+}
+
+.artifactSelect {
+  max-width: 200px;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 6px;
+}
+
+.headNote {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.navCluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.iconBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.iconBtn:hover:not(:disabled) {
+  background: var(--surface-2, rgba(127, 127, 127, 0.08));
+}
+
+.iconBtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.count {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.verBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 9px;
+  white-space: nowrap;
+}
+
+.dirtyDot {
+  font-style: normal;
+  font-size: 10px;
+  color: #b45309;
+  background: rgba(180, 83, 9, 0.12);
+  border-radius: 999px;
+  padding: 0 6px;
+}
+
+.textBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.textBtn:hover:not(:disabled) {
+  background: var(--surface-2, rgba(127, 127, 127, 0.08));
+}
+
+.textBtn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.canvasBody {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.genBar,
+.historyBar,
+.warnBar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  padding: 5px 12px;
+  border-bottom: 1px dashed var(--border);
+  background: var(--surface-1, rgba(127, 127, 127, 0.04));
+}
+
+.warnBar {
+  color: #b45309;
+}
+
+.canvasFrame {
+  flex: 1 1 auto;
+  width: 100%;
+  border: 0;
+  background: var(--surface-0, #ffffff);
+  display: block;
+  min-height: 0;
+}
+
+/* Source view (code pane replacing the preview iframe). */
+.srcPre {
+  flex: 1 1 auto;
+  margin: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 14px;
+  background: var(--surface-0, #ffffff);
+  color: var(--text-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre;
+  tab-size: 2;
+  user-select: text;
+}
+
+/* highlight.js token palette — github-light / github-dark, switched on the
+   host's color-scheme so the panel follows the app theme. */
+.srcPre :global(.hljs-comment),
+.srcPre :global(.hljs-quote) { color: light-dark(#6a737d, #8b949e); font-style: italic }
+.srcPre :global(.hljs-doctag),
+.srcPre :global(.hljs-meta),
+.srcPre :global(.hljs-keyword) { color: light-dark(#d73a49, #ff7b72) }
+.srcPre :global(.hljs-tag),
+.srcPre :global(.hljs-selector-tag) { color: light-dark(#22863a, #7ee787) }
+.srcPre :global(.hljs-name) { color: light-dark(#22863a, #7ee787); font-weight: 500 }
+.srcPre :global(.hljs-attribute),
+.srcPre :global(.hljs-selector-id),
+.srcPre :global(.hljs-selector-class),
+.srcPre :global(.hljs-selector-attr) { color: light-dark(#6f42c1, #d2a8ff) }
+.srcPre :global(.hljs-string),
+.srcPre :global(.hljs-selector-pseudo),
+.srcPre :global(.hljs-regexp) { color: light-dark(#032f62, #a5d6ff) }
+.srcPre :global(.hljs-number),
+.srcPre :global(.hljs-literal),
+.srcPre :global(.hljs-symbol) { color: light-dark(#005cc5, #79c0ff) }
+.srcPre :global(.hljs-built_in),
+.srcPre :global(.hljs-title),
+.srcPre :global(.hljs-section) { color: light-dark(#e36209, #ffa657) }
+.srcPre :global(.hljs-attr),
+.srcPre :global(.hljs-variable),
+.srcPre :global(.hljs-template-variable) { color: light-dark(#24292e, #c9d1d9) }
+.srcPre :global(.hljs-type),
+.srcPre :global(.hljs-subst) { color: light-dark(#d73a49, #ff7b72) }
+.srcPre :global(.hljs-addition) { color: light-dark(#22863a, #56d364) }
+.srcPre :global(.hljs-deletion) { color: light-dark(#b31d28, #ffa198) }
+.srcPre :global(.hljs-emphasis) { font-style: italic }
+.srcPre :global(.hljs-strong) { font-weight: 600 }
+
+.empty {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  padding: 24px;
+  text-align: center;
+}
+
+.emptyHint {
+  font-size: 12px;
+  color: var(--text-muted);
+  max-width: 420px;
+}
+
+/* Empty-with-history picker: REAL cards for the session's known artifacts */
+.pickList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  max-width: 460px;
+  overflow: auto;
+  padding: 4px;
+}
+.pickCard {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  padding: 12px 14px;
+  text-align: left;
+  color: var(--text-primary);
+  background: var(--surface-1, #ffffff0a);
+  /* The ONLY change vs the original ghost card: a border you can actually see. */
+  border: 1px solid light-dark(#d9dfe6, #414954);
+  border-radius: 10px;
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0,0,0,.04);
+  transition: border-color .15s, box-shadow .15s, transform .05s;
+}
+.pickCard:hover {
+  border-color: var(--accent, #185fa5);
+  background: var(--surface-2, #ffffff14);
+  box-shadow: 0 4px 14px rgba(21,55,105,.12);
+}
+.pickCard:active { transform: translateY(1px) }
+.pickCardTop { display: flex; align-items: center; gap: 8px; min-width: 0 }
+.pickCardIcon {
+  flex: none; width: 28px; height: 28px; border-radius: 8px;
+  background: var(--surface-2, #ffffff14);
+  border: 1px solid light-dark(#d9dfe6, #414954);
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--accent, #185fa5);
+}
+.pickCardTitle { flex: 1; min-width: 0; font-size: 13px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.pickCardVer {
+  flex: none; font-size: 11px; color: var(--text-secondary);
+  border: 1px solid light-dark(#d9dfe6, #414954); border-radius: 999px; padding: 1px 8px;
+  font-variant-numeric: tabular-nums;
+}
+.pickCardBottom { display: flex; align-items: center; gap: 8px; min-width: 0 }
+.pickCardId { flex: 1; min-width: 0; color: var(--text-muted); font-size: 11px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.pickCardDirty { flex: none; color: #b45309; background: #b453091c; border-radius: 999px; padding: 0 8px; font-size: 10.5px }
+
+/* Reopened-tab picker caption */
+.pickCardHint { margin: 0 0 4px; font-size: 12.5px; color: var(--text-secondary) }
+
+.miniBtn {
+  font-size: 11px;
+  color: var(--text-primary);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1px 8px;
+  cursor: pointer;
+}
+
+.miniBtn:hover {
+  background: var(--surface-2, rgba(127, 127, 127, 0.08));
+}
+
+.pending {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  text-align: center;
+}
+
+.tabEmpty {
+  height: 100%;
+  display: flex;
+  flex-direction: column;   /* caption + picker stack vertically */
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  padding: 24px;
+  text-align: center;
 }

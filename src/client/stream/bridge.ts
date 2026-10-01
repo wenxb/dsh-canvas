@@ -22,9 +22,11 @@ function bridgeMeasureScript(resizeId: string): string {
  * @param theme - initial host theme for the document.
  * @returns the complete standalone document string.
  */
-export function buildStreamingBridgeDocument(resizeId: string, theme: 'light' | 'dark'): string {
+export function buildStreamingBridgeDocument(resizeId: string, theme: 'light' | 'dark', options: { scrollable?: boolean; measure?: boolean } = {}): string {
+  const overflow = options.scrollable === true ? 'auto' : 'hidden'
   const themeCss = theme === 'dark'
     ? ':root{color-scheme:dark;font-family:system-ui,sans-serif;--surface-0:#161614;--text-primary:#ffffff;--text-secondary:#c3c2b7;--border:#3a3a37}'
     : ':root{color-scheme:light;font-family:system-ui,sans-serif;--surface-0:#ffffff;--text-primary:#1a1a1a;--text-secondary:#52514e;--border:#e3e1da}'
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${ARTIFACT_CSP}"><style>html,body{margin:0;overflow:hidden;background:transparent}${themeCss}</style></head><body><div id="dsh-artifact-root"></div>${bridgeMeasureScript(resizeId)}</body></html>`
+  const measure = options.measure === false ? '' : bridgeMeasureScript(resizeId)
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${ARTIFACT_CSP}"><style>html,body{margin:0;overflow:${overflow};background:transparent}${themeCss}</style></head><body><div id="dsh-artifact-root"></div>${measure}</body></html>`
 }

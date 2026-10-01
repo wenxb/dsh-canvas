@@ -1,0 +1,13 @@
+{
+  "name": "@deepseek-ai/dsh-client-ui-slots",
+  "version": "0.0.0-stub",
+  "private": true,
+  "description": "Minimal local type seat for @deepseek-ai/dsh-client-ui-slots: the installed DSH CLI does not ship this package on npm yet, but its sibling packages' .d.ts files augment the interfaces declared here (SlotMap seats, framework standard props). Only types — no runtime.",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts"
+    },
+    "./package.json": "./package.json"
+  }
+}

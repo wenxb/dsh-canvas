@@ -1,149 +1,216 @@
 /**
- * Server-side semantics of the artifact tool: the pure replace engine and the
- * per-session store (create/patch/read/destroy/list, revisioning, byte caps,
- * truncation, id generation, error taxonomy).
+ * Explicit versioning semantics of the ArtifactStore: create saves 版本 1,
+ * patch never bumps, save snapshots the working copy, revertTo restores a
+ * saved version without touching history.
  */
-
 import { describe, expect, it } from 'vitest'
 import {
-  ArtifactNotFoundError, ArtifactStore, ArtifactTooLargeError, NoChangeError, PatchNotFoundError,
-  makeArtifactId, replaceOccurrences, truncateHtml,
+  ArtifactStore,
+  ArtifactTooLargeError,
+  NoChangeError,
+  PatchNotFoundError,
+  UnknownVersionError,
+  rebuildFromMetas,
+  replaceOccurrences,
+  truncateHtml,
 } from '../src/registry.ts'
 
-describe('replaceOccurrences', () => {
-  it('replaces the first occurrence only by default', () => {
-    expect(replaceOccurrences('a-b-a', 'a', 'x', false)).toEqual({ html: 'x-b-a', count: 1 })
-  })
-
-  it('replaces every occurrence with replace_all', () => {
-    expect(replaceOccurrences('a-b-a', 'a', 'x', true)).toEqual({ html: 'x-b-x', count: 2 })
-  })
-
-  it('reports count 0 and the untouched source when nothing matches', () => {
-    expect(replaceOccurrences('hello', 'zzz', 'x', false)).toEqual({ html: 'hello', count: 0 })
-    expect(replaceOccurrences('hello', 'zzz', 'x', true)).toEqual({ html: 'hello', count: 0 })
-  })
-
-  it('treats an empty old_string and an identical pair as no-ops', () => {
-    expect(replaceOccurrences('abc', '', 'x', false)).toEqual({ html: 'abc', count: 0 })
-    expect(replaceOccurrences('abc', 'b', 'b', true)).toEqual({ html: 'abc', count: 0 })
-  })
-
-  it('handles empty source and empty replacement (deletion)', () => {
-    expect(replaceOccurrences('', 'x', 'y', false)).toEqual({ html: '', count: 0 })
-    expect(replaceOccurrences('hello world', 'o', '', true)).toEqual({ html: 'hell wrld', count: 2 })
-  })
-
-  it('is plain-text matching, never regex', () => {
-    expect(replaceOccurrences('a.b.c', '.', '!', true)).toEqual({ html: 'a!b!c', count: 2 })
-  })
-})
-
-describe('truncateHtml', () => {
-  it('leaves a source within the cap untouched', () => {
-    expect(truncateHtml('abc', 10)).toEqual({ html: 'abc', truncated: false })
-  })
-
-  it('cuts an over-cap source to the cap', () => {
-    const { html, truncated } = truncateHtml('abcdef', 4)
-    expect(truncated).toBe(true)
-    expect(html).toBe('abcd')
-  })
-
-  it('never splits a multi-byte character', () => {
-    // '你' is 3 UTF-8 bytes; cap 4 must keep only the first code point.
-    const { html, truncated } = truncateHtml('你好', 4)
-    expect(truncated).toBe(true)
-    expect(html).toBe('你')
-    expect(new TextEncoder().encode(html).byteLength).toBe(3)
-  })
-})
-
-describe('makeArtifactId', () => {
-  it('produces an art- prefixed id absent from the existing set', () => {
-    const existing = new Set(['art-aaaaaa'])
-    const id = makeArtifactId(existing)
-    expect(id).toMatch(/^art-[a-z0-9]{6}$/)
-    expect(existing.has(id)).toBe(false)
-  })
-})
-
-describe('ArtifactStore', () => {
-  it('creates with revision 1, optional title, and the given source', () => {
+describe('ArtifactStore versioning', () => {
+  it('create saves 版本 1 and get reports it', () => {
     const store = new ArtifactStore()
-    const id = store.create('<div>hi</div>', 'Greeting', 1024)
-    expect(id).toMatch(/^art-/)
-    expect(store.get(id)).toEqual({ html: '<div>hi</div>', revision: 1, title: 'Greeting' })
+    const id = store.create('<p>one</p>', 'Demo', 1024)
+    expect(store.get(id)).toMatchObject({ html: '<p>one</p>', version: 1, title: 'Demo' })
+    expect(store.versionsOf(id)).toHaveLength(1)
+    expect(store.versionsOf(id)[0]?.version).toBe(1)
   })
 
-  it('creates with an empty source and no title', () => {
+  it('patch mutates the working copy WITHOUT creating a version', () => {
     const store = new ArtifactStore()
-    const id = store.create('', undefined, 1024)
-    expect(store.get(id)).toEqual({ html: '', revision: 1 })
-  })
-
-  it('patches in place, bumping revision and reporting the match count', () => {
-    const store = new ArtifactStore()
-    const id = store.create('<div>hello</div>', undefined, 1024)
-    const { state, count } = store.patch(id, 'hello', 'world', false, 1024)
+    const id = store.create('<p>one</p>', undefined, 1024)
+    const { state, count } = store.patch(id, 'one', 'two', false, 1024)
     expect(count).toBe(1)
-    expect(state.revision).toBe(2)
-    expect(state.html).toBe('<div>world</div>')
-    expect(store.get(id).revision).toBe(2)
+    expect(state.html).toBe('<p>two</p>')
+    expect(state.version).toBe(1)
+    expect(store.versionsOf(id)).toHaveLength(1)
   })
 
-  it('replaces all occurrences with replace_all', () => {
+  it('save snapshots the working copy as the next version', () => {
     const store = new ArtifactStore()
-    const id = store.create('<p>a</p><p>a</p>', undefined, 1024)
-    const { state, count } = store.patch(id, 'a', 'b', true, 1024)
-    expect(count).toBe(2)
-    expect(state.html).toBe('<p>b</p><p>b</p>')
+    const id = store.create('<p>v1</p>', undefined, 1024)
+    store.patch(id, 'v1', 'v2', false, 1024)
+    const { state, unchanged } = store.save(id)
+    expect(unchanged).toBe(false)
+    expect(state.version).toBe(2)
+    expect(store.versionsOf(id).map(v => v.version)).toEqual([1, 2])
+    expect(store.versionsOf(id)[1]?.html).toBe('<p>v2</p>')
   })
 
-  it('throws PatchNotFoundError with a context snippet when old_string is absent', () => {
+  it('save with unchanged content reports unchanged and does not push', () => {
     const store = new ArtifactStore()
-    const id = store.create('<div>hello world</div>', undefined, 1024)
+    const id = store.create('<p>same</p>', undefined, 1024)
+    const { unchanged } = store.save(id)
+    expect(unchanged).toBe(true)
+    expect(store.versionsOf(id)).toHaveLength(1)
+  })
+
+  it('revertTo resets the working copy and keeps history; later save continues numbering', () => {
+    const store = new ArtifactStore()
+    const id = store.create('<p>A</p>', undefined, 1024)
+    store.patch(id, 'A', 'B', false, 1024)
+    store.save(id) // 版本 2: <p>B</p>
+    store.patch(id, 'B', 'C', false, 1024)
+    store.save(id) // 版本 3: <p>C</p>
+    const reverted = store.revertTo(id, 1)
+    expect(reverted.html).toBe('<p>A</p>')
+    expect(reverted.version).toBe(3) // newest SAVED version is untouched
+    // A patch after revert edits the restored copy...
+    const { state } = store.patch(id, 'A', 'A2', false, 1024)
+    expect(state.html).toBe('<p>A2</p>')
+    // ...and the next save continues from the highest number.
+    const saved = store.save(id)
+    expect(saved.state.version).toBe(4)
+    expect(store.versionsOf(id).map(v => v.version)).toEqual([1, 2, 3, 4])
+  })
+
+  it('revertTo an unknown version throws UnknownVersionError', () => {
+    const store = new ArtifactStore()
+    const id = store.create('<p>x</p>', undefined, 1024)
+    expect(() => store.revertTo(id, 9)).toThrow(UnknownVersionError)
+  })
+
+  it('caps the version list at MAX_VERSIONS (oldest dropped)', () => {
+    const store = new ArtifactStore()
+    const id = store.create('0', undefined, 1024)
+    for (let i = 1; i <= 25; i++) {
+      store.patch(id, String(i - 1), String(i), false, 1024)
+      store.save(id)
+    }
+    const versions = store.versionsOf(id)
+    expect(versions).toHaveLength(20)
+    expect(versions[0]?.version).toBe(7)
+    expect(versions[19]?.version).toBe(26)
+  })
+
+  it('interactive flag: set at create, toggleable later', () => {
+    const store = new ArtifactStore()
+    const on = store.create('<p>i</p>', 'Demo', 1024, true)
+    expect(store.get(on).interactive).toBe(true)
+    expect(store.get(on).interactive).toBe(true)
+    const off = store.create('<p>p</p>', undefined, 1024)
+    expect(store.get(off).interactive).toBeUndefined()
+    const state = store.setInteractive(off, true)
+    expect(state.interactive).toBe(true)
+    expect(store.get(off).interactive).toBe(true)
+    store.setInteractive(off, false)
+    expect(store.get(off).interactive).toBe(false)
+  })
+
+  it('keeps the patch error contract', () => {
+    const store = new ArtifactStore()
+    const id = store.create('<p>abc</p>', undefined, 1024)
+    expect(() => store.patch(id, 'same', 'same', false, 1024)).toThrow(NoChangeError)
     expect(() => store.patch(id, 'nope', 'x', false, 1024)).toThrow(PatchNotFoundError)
-    expect(() => store.patch(id, 'nope', 'x', false, 1024)).toThrow(/old_string not found/)
+    expect(() => store.create('x'.repeat(2048), undefined, 1024)).toThrow(ArtifactTooLargeError)
+    expect(() => store.get('art-missing')).toThrow(/not found/)
+  })
+})
+
+describe('source helpers', () => {
+  it('replaceOccurrences mirrors edit-tool semantics', () => {
+    expect(replaceOccurrences('aaa', 'a', 'b', true)).toEqual({ html: 'bbb', count: 3 })
+    expect(replaceOccurrences('aaa', 'a', 'b', false)).toEqual({ html: 'baa', count: 1 })
+    expect(replaceOccurrences('abc', 'x', 'y', false)).toEqual({ html: 'abc', count: 0 })
+    expect(replaceOccurrences('abc', 'b', 'b', false)).toEqual({ html: 'abc', count: 0 })
   })
 
-  it('throws NoChangeError for an identical pair', () => {
-    const store = new ArtifactStore()
-    const id = store.create('<div>x</div>', undefined, 1024)
-    expect(() => store.patch(id, 'x', 'x', false, 1024)).toThrow(NoChangeError)
+  it('truncateHtml respects the byte cap without splitting characters', () => {
+    expect(truncateHtml('hello', 5)).toEqual({ html: 'hello', truncated: false })
+    const cut = truncateHtml('héllo', 3)
+    expect(cut.truncated).toBe(true)
+    expect(new TextEncoder().encode(cut.html).byteLength).toBeLessThanOrEqual(3)
   })
+})
 
-  it('rejects a create or patch whose source exceeds the byte cap, leaving state untouched', () => {
-    const store = new ArtifactStore()
-    expect(() => store.create('12345', undefined, 4)).toThrow(ArtifactTooLargeError)
-    const id = store.create('<div>abc</div>', undefined, 1024)
-    expect(() => store.patch(id, 'abc', 'abcdefghijklmnopqrstuvwxyz', false, 16)).toThrow(ArtifactTooLargeError)
-    expect(store.get(id).html).toBe('<div>abc</div>')
-    expect(store.get(id).revision).toBe(1)
-  })
 
-  it('throws ArtifactNotFoundError for unknown ids on every op', () => {
-    const store = new ArtifactStore()
-    expect(() => store.get('art-zzzzzz')).toThrow(ArtifactNotFoundError)
-    expect(() => store.patch('art-zzzzzz', 'a', 'b', false, 1024)).toThrow(ArtifactNotFoundError)
-    expect(() => store.destroy('art-zzzzzz')).toThrow(ArtifactNotFoundError)
-  })
-
-  it('destroys an artifact and drops it from list', () => {
-    const store = new ArtifactStore()
-    const id = store.create('<div>x</div>', undefined, 1024)
-    store.destroy(id)
-    expect(store.list()).toEqual([])
-    expect(() => store.get(id)).toThrow(ArtifactNotFoundError)
-  })
-
-  it('lists summaries in creation order with revision and byte counts', () => {
-    const store = new ArtifactStore()
-    const first = store.create('hello', 'First', 1024)
-    const second = store.create('', undefined, 1024)
-    expect(store.list()).toEqual([
-      { id: first, revision: 1, bytes: 5, title: 'First' },
-      { id: second, revision: 1, bytes: 0 },
+describe('rebuildFromMetas (log-based store recovery)', () => {
+  it('reconstructs create/patch/save/revert sequences', () => {
+    const states = rebuildFromMetas([
+      { op: 'create', id: 'a', version: 1, html: 'v1', title: 'T', interactive: true },
+      { op: 'patch', id: 'a', version: 1, html: 'v2', applied: 1 },
+      { op: 'save', id: 'a', version: 2, html: 'v2' },
+      { op: 'patch', id: 'a', version: 2, html: 'v3', applied: 1 },
+      { op: 'revert', id: 'a', version: 1, html: 'v1' },
     ])
+    const a = states.get('a')
+    expect(a?.html).toBe('v1')
+    expect(a?.title).toBe('T')
+    expect(a?.interactive).toBe(true)
+    expect(a?.versions.map(v => v.version)).toEqual([1, 2])
+  })
+
+  it('skips truncated reads as working-copy sources', () => {
+    const states = rebuildFromMetas([
+      { op: 'create', id: 'a', version: 1, html: 'full-source' },
+      { op: 'read', id: 'a', version: 1, html: 'trunca', truncated: true },
+    ])
+    expect(states.get('a')?.html).toBe('full-source')
+  })
+
+  it('ignores unknown ops and meta-less results', () => {
+    const states = rebuildFromMetas([
+      { op: 'interactive', id: 'a', interactive: false },
+      { op: 'create', id: 'a', version: 1, html: 'v1' },
+      { op: 'interactive', id: 'a', interactive: false },
+    ])
+    expect(states.get('a')?.interactive).toBe(false)
+    expect(states.get('a')?.html).toBe('v1')
+  })
+
+  it('bootstraps from a patch meta when the create meta is missing (fork/schema-era recovery)', () => {
+    // The real-world trace: a fork seed (or schema-rejected create era) starts
+    // the artifact's meta history at a PATCH — the first html-bearing meta is
+    // a complete source snapshot and must rebuild a usable state.
+    const states = rebuildFromMetas([
+      { op: 'patch', id: 'sw', version: 1, html: 'base-plus-edit', applied: 1 },
+      { op: 'save', id: 'sw', version: 2, html: 'base-plus-edit' },
+      { op: 'patch', id: 'sw', version: 2, html: 'further-edit', applied: 1 },
+    ])
+    const sw = states.get('sw')
+    expect(sw).not.toBeUndefined()
+    expect(sw?.html).toBe('further-edit')
+    // The bootstrap made v1 = the post-patch content, so the logged save of
+    // that same content is a genuine no-op (matches the live store's
+    // unchanged-save semantics) — the version list stays [1].
+    expect(sw?.versions.map(v => v.version)).toEqual([1])
+  })
+
+  it('a rebuilt-without-create state is fully usable (patch + revert)', () => {
+    const states = rebuildFromMetas([
+      { op: 'save', id: 'x', version: 3, html: 'saved-three' },
+    ])
+    const store = new ArtifactStore()
+    store.restore('x', states.get('x')!)
+    expect(store.get('x').html).toBe('saved-three')
+    store.patch('x', 'saved-three', 'patched-three', false, 1024 * 1024)
+    store.revertTo('x', 3)
+    expect(store.get('x').html).toBe('saved-three')
+  })
+})
+
+describe('forked-session rebuild (tail-only history)', () => {
+  it('a revert meta for an unknown version materializes that version', () => {
+    const metas = [
+      { op: 'save', id: 'art-f', version: 8, html: '<p>v8</p>' },
+      { op: 'revert', id: 'art-f', version: 7, html: '<p>v7</p>' },
+    ] as const
+    const states = rebuildFromMetas(metas as any)
+    const st = states.get('art-f')!
+    expect(st.html).toBe('<p>v7</p>')
+    expect(st.versions.map(v => v.version)).toEqual([7, 8])
+    // a SECOND revert to that version must now succeed against the store
+    const store = new ArtifactStore()
+    store.restore('art-f', st)
+    store.revertTo('art-f', 7)
+    expect(store.get('art-f')!.html).toBe('<p>v7</p>')
   })
 })

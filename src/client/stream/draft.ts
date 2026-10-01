@@ -16,9 +16,11 @@
  */
 import type {
   ConversationMatch, ConversationNodeContext, ConversationNodeDefinition,
-} from '@deepseek-ai/dsh-client-runtime/client'
-import { conversationContextKey } from '@deepseek-ai/dsh-client-runtime/client'
-import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+} from '@deepseek-ai/dsh-client-ui-conversation/client'
+
+function conversationContextKey(kind: string, id: string): string {
+  return `${kind.length}:${kind}${id}`
+}
 import { extractStreamingHtml, extractStreamingTitle, isStreamingCreate } from './extract.ts'
 
 /** The wire shape of one streamed artifact call inside the Definition state. */
@@ -36,6 +38,10 @@ interface DraftCall {
   announced: boolean
   /** Whether `tool/result` arrived (the draft is done either way). */
   settled: boolean
+  /** Whether the owning step ended with this call unfinished (interrupt —
+   *  crash-disconnect recovery synthesizes the missing `step/end`): the
+   *  draft is permanently dead and must stop showing 正在生成. */
+  dead: boolean
 }
 
 interface ArtifactDraftState {
@@ -54,7 +60,12 @@ export interface ArtifactDraftData {
   title?: string
 }
 
-declare module '@deepseek-ai/dsh-client-ui-conversation/client' {
+// The data map belongs to ui-chat (`contract/chat-nodes.d.ts`), NOT to
+// ui-conversation — merging onto the wrong module typechecks as a no-op and
+// leaves 'artifact-draft' an illegal node kind for any consumer that uses
+// ChatNode<'artifact-draft'>. Mirrors how the shipped node definitions
+// (conversation-nodes/*.d.ts) augment it.
+declare module '@deepseek-ai/dsh-client-ui-chat/client' {
   interface ChatNodeDataMap {
     /** Live artifact draft: renders the model's streaming create html. */
     'artifact-draft': ArtifactDraftData
@@ -63,6 +74,37 @@ declare module '@deepseek-ai/dsh-client-ui-conversation/client' {
 
 function initialState(turn: number, step: number): ArtifactDraftState {
   return { turn, step, calls: new Map() }
+}
+
+/**
+ * Whether one event carries an assistant streaming frame.
+ *
+ * DSH 0.1.5 delivers client-only stream frames as `assistant/live-chunk`
+ * (`AssistantLiveChunkEvent`, carrying `{attemptId, turn, step, chunk}`);
+ * the earlier durable name `assistant/chunk` is gone from the client event
+ * vocabulary. Matching only the old name made the streaming draft never
+ * appear — the live preview silently stopped updating during generation.
+ * Accept both so the draft keeps working across host versions.
+ * @param event - candidate client event.
+ * @returns true when it is a streaming-chunk frame.
+ */
+/** The client streaming frame's data shape (structural — the wire type is not
+ *  re-imported here). */
+export interface LiveChunkEvent {
+  type: 'assistant/live-chunk' | 'assistant/chunk'
+  seq: number
+  time: number
+  data: { turn: number; step: number; chunk: { type: string; [key: string]: unknown } }
+}
+
+/**
+ * Type guard for one assistant streaming frame: narrows a client event union to
+ * the live-chunk shape so the draft's `data.chunk` reads type-check.
+ * @param event - candidate client event.
+ * @returns true when the event is a streaming-chunk frame.
+ */
+function isLiveChunk(event: { type: string }): event is LiveChunkEvent & { type: string } {
+  return event.type === 'assistant/live-chunk' || event.type === 'assistant/chunk'
 }
 
 /** Step identity used by every matched event (mirrors the assistant Definition). */
@@ -92,6 +134,7 @@ function draftCall(callId: string, argsRaw: string, previous: DraftCall | undefi
     ...title === undefined ? {} : { title },
     announced: previous?.announced ?? false,
     settled: previous?.settled ?? false,
+    dead: previous?.dead ?? false,
   }
 }
 
@@ -103,7 +146,7 @@ function draftCall(callId: string, argsRaw: string, previous: DraftCall | undefi
  */
 export function updateDraftState(state: ArtifactDraftState, match: ConversationMatch): ArtifactDraftState {
   const event = match.event
-  if (event.type === 'assistant/chunk') {
+  if (isLiveChunk(event)) {
     const chunk = event.data.chunk
     if (chunk.type === 'tool-call-delta' && chunk.name === 'artifact') {
       const callId = String(chunk.id)
@@ -124,17 +167,41 @@ export function updateDraftState(state: ArtifactDraftState, match: ConversationM
   if (event.type === 'tool/call') {
     const calls = new Map(state.calls)
     const existing = calls.get(event.data.callId)
-    if (existing === undefined) return state
-    calls.set(event.data.callId, { ...existing, announced: true })
+    if (existing !== undefined) {
+      calls.set(event.data.callId, { ...existing, announced: true })
+    } else {
+      for (const [id, call] of calls) {
+        calls.set(id, { ...call, announced: true })
+      }
+    }
     return { ...state, calls }
   }
   if (event.type === 'tool/result') {
     const source = event.data.message.source
     const calls = new Map(state.calls)
     const existing = calls.get(source.callId)
-    if (existing === undefined) return state
-    calls.set(source.callId, { ...existing, settled: true })
+    if (existing !== undefined) {
+      calls.set(source.callId, { ...existing, settled: true })
+    } else {
+      for (const [id, call] of calls) {
+        calls.set(id, { ...call, settled: true })
+      }
+    }
     return { ...state, calls }
+  }
+  if (event.type === 'step/end') {
+    // Step closed with a call never announced/settled: the stream died
+    // (disconnect, cancellation, abort — crash recovery synthesizes this
+    // step/end). Every unfinished call in this step is permanently dead; the
+    // retried attempt lives in a NEW step with its own draft node.
+    let touched = false
+    const calls = new Map(state.calls)
+    for (const [callId, call] of calls) {
+      if (call.settled || call.dead) continue
+      calls.set(callId, { ...call, dead: true })
+      touched = true
+    }
+    return touched ? { ...state, calls } : state
   }
   return state
 }
@@ -144,7 +211,7 @@ export function updateDraftState(state: ArtifactDraftState, match: ConversationM
 function activeDraft(state: ArtifactDraftState): DraftCall | undefined {
   let active: DraftCall | undefined
   for (const call of state.calls.values()) {
-    if (call.announced || call.settled || !call.hasHtml || !isStreamingCreate(call.argsRaw)) continue
+    if (call.announced || call.settled || call.dead || !call.hasHtml || !isStreamingCreate(call.argsRaw)) continue
     active = call
   }
   return active
@@ -160,7 +227,7 @@ export const artifactDraftDefinition: ConversationNodeDefinition<ArtifactDraftSt
   target: 'chat',
   match(event) {
     if (event.type === 'step/start') return { id: stepId(event), role: 'start' }
-    if (event.type === 'assistant/chunk') {
+    if (isLiveChunk(event)) {
       const chunk = event.data.chunk
       if (chunk.type === 'tool-call-delta' && chunk.name === 'artifact') {
         return { id: stepId(event), role: 'update' }
@@ -178,6 +245,11 @@ export const artifactDraftDefinition: ConversationNodeDefinition<ArtifactDraftSt
       // unrelated result for the same step is a no-op.
       return { id: stepId(event), role: 'update' }
     }
+    if (event.type === 'step/end') {
+      // Interrupt (disconnect/cancel) closes the step with unfinished calls:
+      // the synthesized step/end is what retires the 正在生成 draft forever.
+      return { id: stepId(event), role: 'update' }
+    }
     return null
   },
   start: (_context, match) => {
@@ -186,7 +258,7 @@ export const artifactDraftDefinition: ConversationNodeDefinition<ArtifactDraftSt
   },
   update: (context, match) => updateDraftState(context.state, match),
   publication: (match) => {
-    if (match.event.type === 'assistant/chunk'
+    if (isLiveChunk(match.event)
       && match.event.data.chunk.type === 'tool-call-delta') {
       return 'animation-frame'
     }
@@ -208,7 +280,7 @@ export const artifactDraftDefinition: ConversationNodeDefinition<ArtifactDraftSt
     // model started writing the call.
     let anchorSeq = context.start?.event.seq ?? 0
     for (const match of context.matches) {
-      if (match.event.type !== 'assistant/chunk') continue
+      if (!isLiveChunk(match.event)) continue
       const chunk = match.event.data.chunk
       if (chunk.type === 'tool-call-delta' && chunk.name === 'artifact') {
         anchorSeq = match.event.seq

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The artifact-draft Definition state machine: streamed create html folds into
  * a live chat node and hides once the call is announced or settled; patch and
@@ -7,19 +8,19 @@
 import { describe, expect, it } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import type {
-  ChatConversationViewNode, ConversationMatch, ConversationNodeContext, ConversationNodeDefinition,
-} from '@deepseek-ai/dsh-client-runtime/client'
+  ConversationMatch, ConversationNodeContext, ConversationNodeDefinition, ConversationViewNode,
+} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { artifactDraftDefinition, type ArtifactDraftData } from '../src/client/stream/draft.ts'
 
 type Definition = ConversationNodeDefinition<unknown>
-type DraftNode = ChatConversationViewNode & { data: ArtifactDraftData }
+type DraftNode = ConversationViewNode & { data: ArtifactDraftData; visibility?: string }
 
 function match(seq: number, event: SessionEvent, role: 'start' | 'update' = 'update'): ConversationMatch {
-  return { event, view: undefined, role, location: { kind: 'unresolved' } }
+  return { event, role, location: { kind: 'unresolved' } } as unknown as ConversationMatch
 }
 
 function stepStart(seq: number, turn: number, step: number): SessionEvent {
-  return { type: 'step/start', seq, time: 0, data: { turn, step } }
+  return { type: 'step/start', seq: seq as any, time: 0, data: { turn, step } } as unknown as SessionEvent
 }
 
 function delta(seq: number, turn: number, step: number, index: number, id: string, name: string, argumentsDelta: string): SessionEvent {
@@ -47,6 +48,10 @@ function toolResult(seq: number, turn: number, step: number, callId: string): Se
   } as unknown as SessionEvent
 }
 
+function stepEnd(seq: number, turn: number, step: number): SessionEvent {
+  return { type: 'step/end', seq, time: 0, data: { turn, step } } as unknown as SessionEvent
+}
+
 const KEY = 'artifact-draft:1:2'
 
 /** Drive the Definition like the engine: step/start start, then per-event
@@ -61,7 +66,7 @@ function drive(events: SessionEvent[]): { node: DraftNode | null; visible: Draft
   const current = new Map<string, DraftNode>()
   let state: unknown = definition.start(
     { key: KEY, kind: 'artifact-draft', id: '1:2', matches, start: startMatch, state: undefined, current: new Map() } as unknown as ConversationNodeContext<unknown>,
-    startMatch,
+    startMatch as any,
     { previous: () => undefined },
   )
   const build = (): DraftNode | null => {
@@ -93,6 +98,7 @@ describe('artifactDraftDefinition.match', () => {
     expect(definition.match(delta(2, 1, 2, 0, 'call_1', 'artifact', '"op"'))).toEqual({ id: '1:2', role: 'update' })
     expect(definition.match(delta(3, 1, 2, 0, 'call_1', 'write', 'x'))).toBeNull()
     expect(definition.match({ type: 'user/message', seq: 9, time: 0, data: { message: { id: 'm' } } } as unknown as SessionEvent)).toBeNull()
+    expect(definition.match(stepEnd(9, 1, 2))).toEqual({ id: '1:2', role: 'update' })
   })
 })
 
@@ -175,6 +181,31 @@ describe('artifactDraftDefinition streaming fold', () => {
     ]
     const { node } = drive(events)
     expect(node).not.toBeNull()
+    expect(node!.data.callId).toBe('call_1')
+  })
+
+  it('an interrupted stream (step/end with no announce/settle) hides the draft forever', () => {
+    const events = [
+      stepStart(1, 1, 2),
+      delta(2, 1, 2, 0, 'call_1', 'artifact', '{"op":"create","html":"<div>half stream…'),
+      stepEnd(3, 1, 2),
+    ]
+    const { node } = drive(events)
+    // The materialized target stays (withdrawal forbidden) but turns hidden.
+    expect(node).not.toBeNull()
+    expect(node!.visibility).toBe('hidden')
+  })
+
+  it('a finished step does NOT touch drafts closed before it (no double-flip)', () => {
+    const events = [
+      stepStart(1, 1, 2),
+      delta(2, 1, 2, 0, 'call_1', 'artifact', '{"op":"create","html":"<p>x</p>"}'),
+      toolCall(3, 1, 2, 'call_1', 'artifact', '{"op":"create","html":"<p>x</p>"}'),
+      stepEnd(4, 1, 2),
+    ]
+    const { node } = drive(events)
+    expect(node).not.toBeNull()
+    expect(node!.visibility).toBe('hidden')
     expect(node!.data.callId).toBe('call_1')
   })
 })

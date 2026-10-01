@@ -26,7 +26,7 @@ const PLATFORM_MODULES = [
 ] as const
 
 /** Externals resolved from the loader module table. */
-const CLIENT_EXTERNALS: readonly string[] = [...PLATFORM_MODULES, '@deepseek-ai/dsh-client-runtime/client']
+const CLIENT_EXTERNALS: readonly string[] = [...PLATFORM_MODULES]
 
 const CSS_VIRTUAL_PREFIX = '\0dsh-css:'
 const CSS_VIRTUAL_SUFFIX = '.mjs'

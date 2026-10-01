@@ -69,6 +69,23 @@ function measureScript(resizeId: string): string {
   return `<script>(function(){var id=${JSON.stringify(resizeId)};var send=function(){var body=document.body;if(!body){return}var root=body.getBoundingClientRect();var bottom=0;var nodes=body.querySelectorAll("*");for(var i=0;i<nodes.length;i+=1){var el=nodes[i];var tag=el.tagName;if(tag==="SCRIPT"||tag==="STYLE"||tag==="LINK"||tag==="META"){continue}var style=getComputedStyle(el);if(style.display==="none"||style.visibility==="hidden"||style.position==="fixed"){continue}var rect=el.getBoundingClientRect();bottom=Math.max(bottom,rect.bottom-root.top)}var height=Math.max(120,Math.ceil(bottom||body.scrollHeight));parent.postMessage({type:"dsh-artifact-resize",id:id,height:height},"*")};addEventListener("load",send);if(typeof ResizeObserver!=="undefined"){new ResizeObserver(send).observe(document.body)}requestAnimationFrame(send)})()</script>`
 }
 
+/** Submit-intent notifier: pings the host ONLY on explicitly declared submit
+ *  points — ordinary controls (game buttons, on-screen D-pads, sliders, plain
+ *  inputs) must NEVER send data to the model on their own. Two explicit
+ *  triggers inside the page:
+ *   1. a click on any element carrying `data-artifact-submit` (or a
+ *      descendant — design a 提交 button with that attribute);
+ *   2. a genuine <form> submission (default navigation is suppressed so the
+ *      page survives; the page's own submit handlers still run normally).
+ *  A click on a [data-artifact-submit] submit button INSIDE a <form> fires
+ *  BOTH listeners for the same gesture — the 80ms latch merges them into one
+ *  notification so a single gesture never double-submits.
+ *  Everything else stays silent: the header「提交交互」button on the host side
+ *  is the other, chrome-level trigger. */
+function interactScript(resizeId: string): string {
+  return `<script>(function(){var id=${JSON.stringify(resizeId)};var last=0;var notify=function(){var now=Date.now();if(now-last<80){return}last=now;try{parent.postMessage({type:"dsh-artifact-submit-intent",id:id},"*")}catch(e){}};document.addEventListener("click",function(e){var t=e.target;var el=t&&t.closest?t.closest("[data-artifact-submit]"):null;if(el)notify()},true);document.addEventListener("submit",function(e){e.preventDefault();notify()},true)})()</script>`
+}
+
 /** Collect handler: scans the artifact body on a `dsh-artifact-collect`
  *  request and reports the interaction data back to the requester. */
 function collectScript(resizeId: string, collectBody: string): string {
@@ -86,14 +103,30 @@ function collectScript(resizeId: string, collectBody: string): string {
  * @param theme - initial host theme for the document.
  * @returns the complete standalone document string.
  */
-export function buildSandboxedHtmlDocument(source: string, resizeId: string, theme: ArtifactTheme): string {
+export interface SurfaceOptions {
+  /** Let the document scroll instead of clipping (the canvas panel body). */
+  scrollable?: boolean
+  /** Embed the auto-height measure bridge (inline previews; the panel body
+   *  owns its height and skips it). */
+  measure?: boolean
+}
+
+export function buildSandboxedHtmlDocument(
+  source: string,
+  resizeId: string,
+  theme: ArtifactTheme,
+  options: SurfaceOptions = {},
+): string {
+  const scrollable = options.scrollable === true
   const doc = new DOMParser().parseFromString(source, 'text/html')
   const securityHead = `<meta http-equiv="Content-Security-Policy" content="${ARTIFACT_CSP}"><meta name="viewport" content="width=device-width, initial-scale=1">`
-  const themeHead = `<style id="dsh-artifact-theme">html,body{margin:0;overflow:hidden;background:transparent}${themeRootCss(theme)}</style>`
+  const overflow = scrollable ? 'overflow:auto' : 'overflow:hidden'
+  const themeHead = `<style id="dsh-artifact-theme">html,body{margin:0;${overflow};background:transparent}${themeRootCss(theme)}</style>`
+  const bridges = [themeApplyScript(theme)]
+  if (options.measure !== false) bridges.push(measureScript(resizeId))
+  bridges.push(collectScript(resizeId, collectBridgeBody()))
+  bridges.push(interactScript(resizeId))
   doc.head.insertAdjacentHTML('afterbegin', `${securityHead}${themeHead}${storageShimScript()}`)
-  doc.body.insertAdjacentHTML(
-    'afterbegin',
-    `${themeApplyScript(theme)}${measureScript(resizeId)}${collectScript(resizeId, collectBridgeBody())}`,
-  )
+  doc.body.insertAdjacentHTML('afterbegin', bridges.join(''))
   return `<!doctype html>${doc.documentElement.outerHTML}`
 }

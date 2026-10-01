@@ -1,292 +1,257 @@
 /**
- * The artifact tool's atomic view, registered under the `artifact` key of the
- * `tool.call.toolview` slot. Renders the stock ToolRow chrome (title, state
- * dot, disclosure, inspect) with an op-specific body.
- *
- * Timeline-snapshot semantics: every row renders the artifact as it was at
- * THAT call's settlement — a create row keeps the html it was created with, a
- * patch row shows the patched html directly (no diff, no cross-row sync), a
- * read row shows the returned source, destroy/list render their notes. The
- * settled rows are expanded by default: the preview is the point.
- *
- * The card is result-only: running calls show the generic pending row; a
- * settled call whose view is not a well-formed artifact card falls back to
- * the generic path (rendering nothing extra here).
+ * The in-chat artifact card: a COMPACT row (icon + title + one-line Chinese
+ * status + actions) instead of an embedded preview iframe. Clicking anywhere
+ * on the row opens the canvas panel — the Gemini-canvas pattern, and the fix
+ * for the old inline previews squashing to ~120px. The full document lives in
+ * the panel; the chat keeps a lightweight pointer to it.
  * @module
  */
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
-import {
-  DisclosureRow, IconCodeOutline16, IconCopyOutline16, IconEditOutline16, IconInspectOutline12, IconSendOutline16, StateDot, writeClipboard,
-} from '@deepseek-ai/dsh-client-ui-primitives'
-// The stock row's stylesheet, imported through the package's exported src
-// subpath and inlined — the row renders with the exact stock chrome.
-import rowCss from '@deepseek-ai/dsh-client-ui-tool/src/client/tool/components/ToolRow.module.css'
-import { artifactArgs, artifactCardModel, type ArtifactSummaryView, type ToolCallOwnerProps } from './contract.ts'
-import { buildSandboxedHtmlDocument, hostArtifactTheme, type ArtifactTheme } from './sandbox.ts'
-import { DraftSurface } from './stream/DraftSurface.tsx'
-import { submitInteraction } from './stream/submit.ts'
+import { useEffect, useRef, useState } from 'react'
+import type { ArtifactCardView } from './contract.ts'
+import type { ToolCallOwnerProps } from './contract.ts'
+
+/**
+ * The subset of {@link ToolCallOwnerProps} this row actually consumes.
+ *
+ * Deliberately NARROW: the row renders a pointer to the canvas and never loads
+ * an image, so requiring the full owner contract would force the streaming
+ * draft node (whose props come from the chat-node slot, not the tool-call
+ * slot) to fabricate a `loadImage` it has no way to honour. Still assignable
+ * FROM the real owner, so the keyed `tool.call.toolview` registration accepts
+ * it unchanged.
+ */
+export type ArtifactRowProps = Pick<ToolCallOwnerProps, 'callId' | 'toolName' | 'block' | 'cwd' | 'openFile' | 'inspect'> & {
+  useToolCallArgumentsPartial?: () => string
+}
+import { artifactArgs, artifactCardModel, cardVersion } from './contract.ts'
+import { canvasBridge, useCanvasState } from './canvas/state.ts'
+import { extractStreamingHtml, extractStreamingTitle, isStreamingCreate } from './stream/extract.ts'
+import { IconCheck, IconCode, IconCopy, IconOpen } from './icons.tsx'
 import css from './artifact.module.css'
 
-/** Row state semantic; colors self-supplied via StateDot. */
-type ToolRowState = 'running' | 'ok' | 'error' | 'stopped'
-
-/** Full props of the artifact row (the stock ToolCallOwnerProps currency). */
-export type ArtifactRowProps = ToolCallOwnerProps
-
-/** Render a one-line escape for the source view. */
-function escapeHtml(text: string): string {
-  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+/** Byte counts as human-readable text. */
+function formatBytes(html: string): string {
+  const bytes = new TextEncoder().encode(html).byteLength
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${bytes} B`
 }
 
-/** Request the sandbox surface to collect its interaction data (bridge
- *  postMessage round-trip, bounded by a timeout). */
-function collectFromFrame(frame: HTMLIFrameElement, resizeId: string): Promise<unknown | null> {
-  return new Promise((resolve) => {
-    let settled = false
-    const finish = (value: unknown | null) => {
-      if (settled) return
-      settled = true
-      window.removeEventListener('message', onMessage)
-      window.clearTimeout(timer)
-      resolve(value)
-    }
-    const onMessage = (event: MessageEvent) => {
-      const data = event.data
-      if (event.source !== frame.contentWindow) return
-      if (data === null || typeof data !== 'object') return
-      if ((data as { type?: unknown }).type !== 'dsh-artifact-collect-result') return
-      if ((data as { id?: unknown }).id !== resizeId) return
-      finish((data as { data?: unknown }).data ?? null)
-    }
-    const timer = window.setTimeout(() => finish(null), 2500)
-    window.addEventListener('message', onMessage)
-    frame.contentWindow?.postMessage({ type: 'dsh-artifact-collect', id: resizeId }, '*')
-  })
-}
-
-/** The sandboxed preview of ONE snapshot: an iframe built from the given html. */
-function ArtifactSurface({ id, title, revision, html }: {
-  id: string
-  title?: string | undefined
-  revision: number
-  html: string
-}) {
-  const [view, setView] = useState<'preview' | 'source'>('preview')
-  const [height, setHeight] = useState(240)
+/** Copy button with transient success feedback (click stays in-row). */
+function CopyButton({ html }: { html: string }) {
   const [copied, setCopied] = useState(false)
-  const [submitState, setSubmitState] = useState<'idle' | 'collecting' | 'submitted' | 'error'>('idle')
-  const [theme] = useState<ArtifactTheme>(hostArtifactTheme)
-  const frameRef = useRef<HTMLIFrameElement>(null)
-  const resizeId = useId()
-  const srcDoc = useMemo(() => buildSandboxedHtmlDocument(html, resizeId, theme), [html, resizeId, theme])
+  /** Cleared on unmount so a 1.5s feedback timer cannot fire into a gone row. */
+  const feedbackTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  useEffect(() => () => {
+    if (feedbackTimer.current !== undefined) clearTimeout(feedbackTimer.current)
+  }, [])
+  return (
+    <button
+      type="button"
+      className={css.rowBtn}
+      title="复制源码"
+      onClick={(event) => {
+        event.stopPropagation()
+        void navigator.clipboard?.writeText(html).then(() => {
+          setCopied(true)
+          feedbackTimer.current = setTimeout(() => setCopied(false), 1500)
+        })
+      }}
+    >
+      {copied ? <IconCheck /> : <IconCopy />}
+      {copied ? '已复制' : '复制源码'}
+    </button>
+  )
+}
 
+/** The Chinese status line for one settled html-bearing card. */
+function statusLine(view: Extract<ArtifactCardView, { html: string }>): string {
+  const version = cardVersion(view)
+  const versionText = version === undefined ? '' : `版本 ${version}`
+  switch (view.op) {
+    case 'create':
+      return `已创建${versionText === '' ? '' : ` · ${versionText}`} · ${formatBytes(view.html)}`
+    case 'patch':
+      return `已修改 ${view.applied === undefined ? 1 : view.applied} 处 · 未保存新版本`
+    case 'save':
+      return view.unchanged === true && versionText !== '' ? `内容未变，仍为 ${versionText}` : `已保存为 ${versionText}`
+    case 'revert':
+      return `已回退到 ${versionText}`
+    case 'read':
+      return `读取源码 · ${formatBytes(view.html)}${view.truncated === true ? '（已截断）' : ''}`
+  }
+}
+
+/**
+ * A settled call that intentionally draws NOTHING — and, crucially, collapses
+ * the chat flow item around it. The host chat column is a flex list with a
+ * fixed gap between items, so a mere `null` render leaves one empty flow item
+ * per patch standing; a run of four patches used to strand an ~80px blank
+ * band mid-conversation. Each tool call owns its flow item (verified against
+ * the live DOM: callRows ↔ flowItems 1:1), so hiding the closest slot wrapper's
+ * parent removes the gap entirely.
+ */
+export function HiddenRow() {
+  const ref = useRef<HTMLDivElement | null>(null)
   useEffect(() => {
-    const onMessage = (event: MessageEvent) => {
-      const data = event.data
-      if (data === null || typeof data !== 'object') return
-      if ((data as { type?: unknown }).type !== 'dsh-artifact-resize') return
-      if ((data as { id?: unknown }).id !== resizeId) return
-      if (event.source !== frameRef.current?.contentWindow) return
-      const measured = Number((data as { height?: unknown }).height)
-      if (Number.isFinite(measured)) {
-        setHeight(Math.min(4000, Math.max(120, Math.round(measured))))
+    const el = ref.current
+    if (!el) return
+    const callRow = el.closest<HTMLElement>('[data-chat-call-id]')
+    const prevCallDisplay = callRow?.style.display
+    if (callRow) {
+      callRow.style.display = 'none'
+    }
+    const flowItem = el.closest<HTMLElement>('[data-chat-flow-kind], [data-chat-flow-key]')
+      ?? (el.closest('[data-slot="conversation.chat.node"]')?.parentElement as HTMLElement | null)
+    let prevFlowDisplay: string | undefined
+    if (flowItem instanceof HTMLElement && (flowItem.dataset.chatFlowKind === 'artifact-draft' || flowItem.childElementCount === 1)) {
+      prevFlowDisplay = flowItem.style.display
+      flowItem.style.display = 'none'
+    }
+    return () => {
+      if (callRow && prevCallDisplay !== undefined) {
+        callRow.style.display = prevCallDisplay
+      }
+      if (flowItem instanceof HTMLElement && prevFlowDisplay !== undefined) {
+        flowItem.style.display = prevFlowDisplay
       }
     }
-    window.addEventListener('message', onMessage)
-    return () => window.removeEventListener('message', onMessage)
-  }, [resizeId])
-
-  const onCopy = async () => {
-    if (await writeClipboard(html)) {
-      setCopied(true)
-      window.setTimeout(() => setCopied(false), 1200)
-    }
-  }
-
-  const onSubmit = async () => {
-    const frame = frameRef.current
-    if (frame === null) return
-    setSubmitState('collecting')
-    const data = await collectFromFrame(frame, resizeId)
-    if (data === null) {
-      setSubmitState('error')
-      return
-    }
-    const ok = await submitInteraction(id, title, data)
-    setSubmitState(ok ? 'submitted' : 'error')
-    if (ok) {
-      window.setTimeout(() => setSubmitState('idle'), 2500)
-    }
-  }
-
-  return (
-    <div className={css.surface} data-artifact-surface="">
-      {view === 'preview'
-        ? <iframe
-            ref={frameRef}
-            className={css.frame}
-            sandbox="allow-scripts"
-            srcDoc={srcDoc}
-            style={{ height }}
-            title={`HTML artifact ${id}`}
-          />
-        : <pre className={css.source}>{html}</pre>}
-      {/* The action row sits BELOW the rendered content and is ALWAYS present
-          (preview or source), so Source↔Preview is always recoverable: title,
-          revision, the view toggle, copy, and the interaction submit (submit
-          only exists in the interactive preview). */}
-      <div className={css.submitBar} data-artifact-actions="">
-        <span className={css.toolbarTitle}>{title ?? `Artifact ${id}`}</span>
-        <span className={css.badge}>rev {revision}</span>
-        <button type="button" className={css.toolButton} onClick={() => setView(v => v === 'preview' ? 'source' : 'preview')}>
-          <IconCodeOutline16 size={14} />
-          {view === 'preview' ? 'Source' : 'Preview'}
-        </button>
-        <button type="button" className={css.toolButton} onClick={onCopy}>
-          <IconCopyOutline16 size={14} />
-          {copied ? 'Copied' : 'Copy HTML'}
-        </button>
-        {view === 'preview' && (
-          <button type="button" className={css.toolButton} onClick={onSubmit} disabled={submitState === 'collecting'}>
-            <IconSendOutline16 size={14} />
-            {submitState === 'collecting' ? 'Collecting…'
-              : submitState === 'submitted' ? 'Submitted ✓'
-                : submitState === 'error' ? 'Failed'
-                  : 'Submit interaction'}
-          </button>
-        )}
-      </div>
-    </div>
-  )
+  }, [])
+  return <div ref={ref} data-artifact-hidden="true" style={{ display: 'none' }} aria-hidden="true" />
 }
 
-/** The returned source of a read call, capped to a sane preview length. */
-function SourceView({ html, truncated }: { html: string; truncated?: boolean }) {
-  const capped = html.split('\n').slice(0, 200).join('\n')
-  return (
-    <pre className={css.source} data-artifact-source="">
-      {escapeHtml(capped)}
-      {truncated !== undefined && truncated && '\n… (source truncated in the read result)'}
-    </pre>
-  )
-}
-
-/** The session's artifact summaries from a list call. */
-function ArtifactList({ artifacts }: { artifacts: ArtifactSummaryView[] }) {
-  if (artifacts.length === 0) {
-    return <div className={css.closed} data-artifact-list="">(no HTML artifacts in this session)</div>
-  }
-  return (
-    <div className={css.list} data-artifact-list="">
-      {artifacts.map((summary) => (
-        <div key={summary.id} className={css.listRow}>
-          <span className={css.listId}>{summary.id}</span>
-          {summary.title !== undefined && <span className={css.listTitle}>{summary.title}</span>}
-          <span className={css.badge}>rev {summary.revision}</span>
-          <span className={css.badge}>{summary.bytes} bytes</span>
-        </div>
-      ))}
-    </div>
-  )
-}
-
-/** Derive the row's pending/completed title for the artifact op. */
-function rowTitle(op: string, id: string | undefined): string {
-  switch (op) {
-    case 'create': return id === undefined ? 'Create HTML artifact' : `HTML artifact ${id}`
-    case 'patch': return `Patch artifact ${id ?? ''}`
-    case 'read': return `Read artifact ${id ?? ''}`
-    case 'destroy': return `Destroy artifact ${id ?? ''}`
-    case 'list': return 'List HTML artifacts'
-    default: return 'HTML artifact'
-  }
-}
-
-/** The artifact row: stock ToolRow chrome with the op-specific body. Only the
- *  rendering ops (create/patch — and the streaming create draft) expand by
- *  default; read/destroy/list stay collapsed until clicked. */
-export function ArtifactRow({ toolName, block, cwd, openFile, inspect }: ArtifactRowProps) {
+/**
+ * The keyed `tool.call.toolview` row for the artifact tool: a compact card;
+ * click opens the canvas panel.
+ * @param props - owner currency supplied by the stock ui-tool rows.
+ */
+export function ArtifactRow(props: ArtifactRowProps) {
+  const { block } = props
   const model = artifactCardModel(block)
   const args = artifactArgs(block)
-  const done = 'kind' in block
-  const op = (model === null ? args?.op : model.view.op) ?? (args?.op ?? 'unknown')
-  const [expanded, setExpanded] = useState(op === 'create' || op === 'patch')
-  const id = model !== null && 'id' in model.view ? model.view.id : args?.id
-  const title = rowTitle(op, id)
-  const summary = model !== null && 'id' in model.view && model.view.op === 'create'
-    ? (model.view.title ?? model.view.id)
-    : model !== null && model.view.op === 'list'
-      ? `${model.view.artifacts.length} artifact${model.view.artifacts.length === 1 ? '' : 's'}`
-      : id !== undefined ? id : (args?.title ?? '')
-  const state: ToolRowState = !done ? 'running'
-    : block.error?.code === 'interrupted' ? 'stopped'
-      : block.isError ? 'error' : 'ok'
+  const canvas = useCanvasState()
 
-  // Running create: the streaming bridge iframe (the tool row IS the draft).
-  // Settled: the op-specific timeline-snapshot body.
-  const body = !done
-    ? (op === 'create' && args?.html !== undefined ? <DraftSurface html={args.html} /> : null)
-    : model === null ? null : (() => {
-      const view = model.view
-      switch (view.op) {
-        case 'create': return (
-          <ArtifactSurface id={view.id} revision={view.revision} html={view.html}
-            {...view.title !== undefined ? { title: view.title } : {}} />
-        )
-        case 'patch': return (
-          // The patch row renders the NEW html directly — the timeline shows the
-          // artifact as it was at each call, no diff and no cross-row sync.
-          <ArtifactSurface id={view.id} revision={view.revision} html={view.html} />
-        )
-        case 'read': return <SourceView html={view.html} truncated={view.truncated === true} />
-        case 'destroy': return <div className={css.closed}>Artifact {view.id} closed.</div>
-        case 'list': return <ArtifactList artifacts={view.artifacts} />
-      }
-    })()
-  const expandable = body !== null
-  const open = expanded && expandable
-  const toggleExpand = () => { setExpanded(v => !v) }
-  const failureLine = state === 'error' ? summary : null
+  const partial = typeof props.useToolCallArgumentsPartial === 'function' ? props.useToolCallArgumentsPartial() : undefined
+  const rawArgs = partial ?? ('argsRaw' in block && typeof block.argsRaw === 'string' ? block.argsRaw : '')
+  const partialTitle = rawArgs ? extractStreamingTitle(rawArgs) : undefined
+  const partialHtml = rawArgs ? extractStreamingHtml(rawArgs)?.html : undefined
+  const reportedTitle = canvas.reportedStream?.callId === props.callId ? canvas.reportedStream.title : undefined
+
+  const op = args?.op
+  const isCreate = op === 'create' || (op === undefined && isStreamingCreate(rawArgs))
+  const target = args?.title ?? args?.id ?? partialTitle ?? reportedTitle
+
+  useEffect(() => {
+    if (partialHtml !== undefined && !('kind' in block)) {
+      canvasBridge.reportStream({
+        callId: props.callId,
+        html: partialHtml,
+        title: target,
+      })
+    }
+  }, [props.callId, partialHtml, target, block])
+
+  useEffect(() => () => {
+    if (canvasBridge.getSnapshot().reportedStream?.callId === props.callId) {
+      canvasBridge.reportStream(undefined)
+    }
+  }, [props.callId])
+
+  const rowRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    const el = rowRef.current
+    if (!el) return
+    const callRow = el.closest<HTMLElement>('[data-chat-call-id]')
+    if (callRow && callRow.style.display === 'none') {
+      callRow.style.display = ''
+    }
+    const flowItem = el.closest<HTMLElement>('[data-chat-flow-kind], [data-chat-flow-key]')
+      ?? (el.closest('[data-slot="conversation.chat.node"]')?.parentElement as HTMLElement | null)
+    if (flowItem instanceof HTMLElement && flowItem.style.display === 'none') {
+      flowItem.style.display = ''
+    }
+  })
+
+  // Running calls:
+  // - If op is non-create (patch/save/revert/read/destroy/list), hide it strictly.
+  // - For create, render the in-flight generation hint until settled.
+  if (model === null) {
+    if (!('kind' in block)) {
+      if (canvasBridge.isZombieCall(block.callId)) return <HiddenRow />
+      const isNonCreate = op !== undefined
+        ? op !== 'create'
+        : (/"op"\s*:\s*"(?:patch|save|revert|read|destroy|list|interactive)"/u.test(rawArgs) || /"id"\s*:/u.test(rawArgs))
+      if (isNonCreate) return <HiddenRow />
+
+      const createTitle = args?.title ?? partialTitle ?? reportedTitle
+      const label = createTitle === undefined || createTitle === '' ? '正在生成 HTML artifact…' : `正在生成「${createTitle}」…`
+      return (
+        <div ref={rowRef} className={css.row} onClick={() => canvasBridge.open()}>
+          <span className={css.rowMark}><i className={css.pulse} /></span>
+          <span className={css.rowMain}>
+            <span className={css.rowTitle}>{label}</span>
+            <span className={css.rowSub}>完成后可在画布中查看</span>
+          </span>
+          <span className={`${css.rowActions} ${css.openHint}`}><IconOpen /></span>
+        </div>
+      )
+    }
+    return <HiddenRow />
+  }
+
+  const view = model.view
+  // Settled patches add NO conversation block — versions are the blocks
+  // (create/save/revert); the RUNNING patch row already showed 正在修改…,
+  // and the canvas's 未保存 badge tracks the unsaved state. HiddenRow also
+  // erases the flex-gap flow item so a run of patches leaves no blank band.
+  if (view.op === 'patch') return <HiddenRow />
+  if (view.op === 'destroy') {
+    return (
+      <div className={`${css.row} ${css.rowMuted}`} onClick={() => canvasBridge.open(view.id)}>
+        <span className={css.rowMark}><IconCode size={16} /></span>
+        <span className={css.rowMain}>
+          <span className={css.rowTitle}>HTML artifact 已删除</span>
+          <span className={css.rowSub}>{view.id}</span>
+        </span>
+      </div>
+    )
+  }
+  if (view.op === 'list') {
+    const label = view.artifacts.length === 0 ? '没有 HTML artifact' : `共 ${view.artifacts.length} 个 HTML artifact`
+    return (
+      <div className={`${css.row} ${css.rowMuted}`}>
+        <span className={css.rowMark}><IconCode size={16} /></span>
+        <span className={css.rowMain}>
+          <span className={css.rowTitle}>列出 artifact</span>
+          <span className={css.rowSub}>{label}</span>
+        </span>
+      </div>
+    )
+  }
+
+  if (view.op === 'interactive') {
+    return (
+      <div ref={rowRef} className={css.row} onClick={() => canvasBridge.open(view.id)}>
+        <span className={css.rowMark}><IconCode size={16} /></span>
+        <span className={css.rowMain}>
+          <span className={css.rowTitle}>{view.title ?? view.id}</span>
+          <span className={css.rowSub}>{view.interactive === true ? '交互数据已开启 · 画布显示提交按钮' : '交互数据已关闭 · 画布隐藏提交按钮'}</span>
+        </span>
+      </div>
+    )
+  }
 
   return (
-    <div className={rowCss.root} data-variant="edit" data-tool={toolName} data-state={state} data-artifact-row="">
-      {state === 'running' && <span className={rowCss.visuallyHidden}>Running</span>}
-      <DisclosureRow
-        rowClassName={rowCss.row}
-        leadingClassName={rowCss.leading}
-        titleClassName={rowCss.title}
-        chevronClassName={rowCss.chevron}
-        icon={state === 'error' ? <StateDot state="error" />
-          : state === 'stopped' ? <StateDot state="warning" />
-            : state === 'running' ? <StateDot state="ongoing" />
-              : <IconEditOutline16 size={14} />}
-        title={title}
-        open={open}
-        expandable={expandable}
-        expandOnRowClick
-        keepContentWhenOpen
-        onToggle={toggleExpand}
-        collapsedContent={summary !== '' && (
-          <>
-            <span className={rowCss.sep} aria-hidden />
-            {failureLine !== null ? (
-              <span className={`${rowCss.summary} ${rowCss.errorSummary}`}>{failureLine}</span>
-            ) : (
-              <span className={rowCss.summary}>{summary}</span>
-            )}
-          </>
-        )}
-      >
-        <div className={rowCss.bodyWrap}>
-          {body}
-          {inspect !== undefined && (
-            <button type="button" className={rowCss.inspectButton} onClick={inspect}>
-              <IconInspectOutline12 />
-              Inspect
-            </button>
-          )}
-        </div>
-      </DisclosureRow>
+    <div ref={rowRef} className={css.row} onClick={() => canvasBridge.open(view.id)}>
+      <span className={css.rowMark}><IconCode size={16} /></span>
+      <span className={css.rowMain}>
+        <span className={css.rowTitle}>{view.title ?? view.id}</span>
+        <span className={css.rowSub}>{statusLine(view)}</span>
+      </span>
+      <span className={css.rowActions}>
+        <CopyButton html={view.html} />
+        <span className={css.openHint}><IconOpen />画布</span>
+      </span>
     </div>
   )
 }

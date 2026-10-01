@@ -84,3 +84,49 @@ export function renderSubmissionSummary(submission: InteractionSubmission): stri
   const label = submission.title === undefined ? submission.id : `${submission.id}（${submission.title}）`
   return `artifact ${label} 交互数据（${count} 个字段）`
 }
+
+/** One user-side revert request delivered through `/artifact-revert`. */
+export interface RevertRequest {
+  /** The artifact id to revert. */
+  id: string
+  /** The saved version to restore as the working copy. */
+  version: number
+  /** Optional artifact display title (for nicer notices). */
+  title?: string
+}
+
+/** Result of parsing one `/artifact-revert` raw input. */
+export type RevertParseResult =
+  | { ok: true; value: RevertRequest }
+  | { ok: false; error: string }
+
+/**
+ * Parse the raw input following `/artifact-revert` into a revert request.
+ * @param raw - the exact text after the command name (whitespace included).
+ * @returns the parsed request or a validation error.
+ */
+export function parseRevertRequest(raw: string): RevertParseResult {
+  let payload: unknown
+  try {
+    payload = JSON.parse(raw)
+  } catch {
+    return { ok: false, error: 'artifact-revert: expected a JSON payload after the command name' }
+  }
+  if (payload === null || typeof payload !== 'object') {
+    return { ok: false, error: 'artifact-revert: payload must be a JSON object' }
+  }
+  const record = payload as Record<string, unknown>
+  const { id, version, title } = record
+  if (typeof id !== 'string' || id.length === 0) {
+    return { ok: false, error: 'artifact-revert: "id" must be a non-empty string' }
+  }
+  if (typeof version !== 'number' || !Number.isInteger(version) || version < 1) {
+    return { ok: false, error: 'artifact-revert: "version" must be a positive integer' }
+  }
+  return {
+    ok: true,
+    value: { id, version, ...typeof title === 'string' && title !== '' ? { title } : {} },
+  }
+}
+
+
