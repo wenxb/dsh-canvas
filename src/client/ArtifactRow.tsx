@@ -7,7 +7,7 @@
  * @module
  */
 import { useEffect, useRef, useState } from 'react'
-import type { ArtifactCardView } from './contract.ts'
+import type { ArtifactCardView, ArtifactHtmlCard } from './contract.ts'
 import type { ToolCallOwnerProps } from './contract.ts'
 
 /**
@@ -65,13 +65,17 @@ function CopyButton({ html }: { html: string }) {
   )
 }
 
-/** The Chinese status line for one settled html-bearing card. */
-function statusLine(view: Extract<ArtifactCardView, { html: string }>): string {
+/** The Chinese status line for one settled source-bearing card. */
+function statusLine(view: ArtifactHtmlCard): string {
   const version = cardVersion(view)
   const versionText = version === undefined ? '' : `版本 ${version}`
   switch (view.op) {
+    // `create`/`read` always carry source, but the union allows its absence, so
+    // the byte count is conditional rather than an unchecked `view.html`.
     case 'create':
-      return `已创建${versionText === '' ? '' : ` · ${versionText}`} · ${formatBytes(view.html)}`
+      return `已创建${versionText === '' ? '' : ` · ${versionText}`}${view.html === undefined ? '' : ` · ${formatBytes(view.html)}`}`
+    // A patch no longer ships its resulting source (the log keeps its cause),
+    // so the line is complete without it.
     case 'patch':
       return `已修改 ${view.applied === undefined ? 1 : view.applied} 处 · 未保存新版本`
     case 'save':
@@ -79,7 +83,11 @@ function statusLine(view: Extract<ArtifactCardView, { html: string }>): string {
     case 'revert':
       return `已回退到 ${versionText}`
     case 'read':
-      return `读取源码 · ${formatBytes(view.html)}${view.truncated === true ? '（已截断）' : ''}`
+      return `读取源码${view.html === undefined ? '' : ` · ${formatBytes(view.html)}`}${view.truncated === true ? '（已截断）' : ''}`
+    // Exhaustive over HtmlArtifactOp; unreachable, but keeps the function total
+    // if the op vocabulary grows without this switch being updated.
+    default:
+      return view.id
   }
 }
 
@@ -213,7 +221,8 @@ export function ArtifactRow(props: ArtifactRowProps) {
         <span className={css.rowSub}>{statusLine(view)}</span>
       </span>
       <span className={css.rowActions}>
-        <CopyButton html={view.html} />
+        {/* No source on a patch card, so there is nothing to copy. */}
+        {view.html === undefined ? null : <CopyButton html={view.html} />}
         <span className={css.openHint}><IconOpen />画布</span>
       </span>
     </div>

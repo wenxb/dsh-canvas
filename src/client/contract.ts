@@ -50,21 +50,33 @@ export type HtmlArtifactOp = 'create' | 'patch' | 'save' | 'revert' | 'read'
  * every malformed field falls back to the generic card. Sessions logged by the
  * pre-versioning plugin carry `revision`; new ones carry `version`.
  */
+/**
+ * A card that can carry artifact SOURCE.
+ *
+ * `html` is OPTIONAL for one op only — `patch`. The log does not store a full
+ * copy of the post-patch working copy (measured: 7.87 MB of one real 29.49 MB
+ * log, against 0.16 MB for the same patches' arguments), so a patch ships its
+ * cause instead and the fold reproduces it. Every other op still requires it;
+ * callers that need real source must narrow with a `typeof view.html === 'string'`
+ * check rather than assuming.
+ */
+export interface ArtifactHtmlCard {
+  card: 'artifact'
+  op: HtmlArtifactOp
+  id: string
+  version?: number
+  revision?: number
+  html?: string
+  title?: string
+  applied?: number
+  truncated?: boolean
+  unchanged?: boolean
+  /** Whether interaction data is expected (drives the 提交交互 button). */
+  interactive?: boolean
+}
+
 export type ArtifactCardView =
-  | {
-      card: 'artifact'
-      op: HtmlArtifactOp
-      id: string
-      version?: number
-      revision?: number
-      html: string
-      title?: string
-      applied?: number
-      truncated?: boolean
-      unchanged?: boolean
-      /** Whether interaction data is expected (drives the 提交交互 button). */
-      interactive?: boolean
-    }
+  | ArtifactHtmlCard
   | { card: 'artifact'; op: 'interactive'; id: string; version?: number; interactive: boolean; title?: string }
   | { card: 'artifact'; op: 'destroy'; id: string }
   | { card: 'artifact'; op: 'list'; dir?: string; artifacts: ArtifactSummaryView[] }
@@ -75,14 +87,14 @@ export interface ArtifactCardModel {
 }
 
 type ArtifactCardModelView =
-  | Extract<ArtifactCardView, { html: string }>
+  | ArtifactHtmlCard
   | Extract<ArtifactCardView, { op: 'interactive' }>
   | Extract<ArtifactCardView, { op: 'destroy' }>
   | Extract<ArtifactCardView, { op: 'list' }>
 
 /** The saved-version number of an html-bearing card (`version`, falling back
  *  to the legacy `revision`), or undefined when neither is well-formed. */
-export function cardVersion(view: Extract<ArtifactCardView, { html: string }>): number | undefined {
+export function cardVersion(view: ArtifactHtmlCard): number | undefined {
   if (typeof view.version === 'number') return view.version
   if (typeof view.revision === 'number') return view.revision
   return undefined
@@ -123,11 +135,18 @@ export function artifactCardModel(block: ToolCallBlock): ArtifactCardModel | nul
   if (typeof op !== 'string') return null
   if (HTML_OPS.includes(op)) {
     const { id, version, revision, html, title, applied, truncated, unchanged, interactive } = view
-    if (typeof id !== 'string' || typeof html !== 'string') return null
+    if (typeof id !== 'string') return null
+    // A PATCH is the one op that may legitimately arrive with no source: its
+    // meta carries the cause (bytes + fingerprint) and the fold reproduces it
+    // from the tool call's arguments. Requiring html here would DROP every patch
+    // card from the client timeline — the artifact would appear to stop
+    // updating entirely.
+    if (op !== 'patch' && typeof html !== 'string') return null
     if (typeof version !== 'number' && typeof revision !== 'number') return null
     return {
       view: {
-        card: 'artifact', op: op as HtmlArtifactOp, id, html,
+        card: 'artifact', op: op as HtmlArtifactOp, id,
+        ...typeof html === 'string' ? { html } : {},
         ...typeof version === 'number' ? { version } : {},
         ...typeof revision === 'number' ? { revision } : {},
         ...typeof title === 'string' ? { title } : {},

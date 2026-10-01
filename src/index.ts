@@ -34,6 +34,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 type JsonValue = string | number | boolean | null | { [key: string]: JsonValue } | JsonValue[]
 import { parseImportRequest, parseRevertRequest, parseSubmissionPayload, renderInteractionSubmission, renderSubmissionSummary, resolveImportContent } from './interaction.ts'
 import { ArtifactStore, UnknownVersionError, rebuildFromMetas, truncateHtml, type ArtifactMetaLike } from './registry.ts'
+import { contentHash, readPatchArgs } from './patch.ts'
 import { DEFAULT_PERSIST_ROOT, makePersister, persistDirFor, type ArtifactPersistence } from './persistence.ts'
 import { LIBRARY_MAX_ARTIFACTS, libraryListingPayload, libraryVersionsPayload, readLibraryArtifact, scanLibrary } from './library.ts'
 import {
@@ -48,6 +49,16 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 
 /** Cordis plugin name. */
 export const name = 'dsh-html-artifact'
+
+/**
+ * The wire name of the artifact tool.
+ *
+ * A SINGLE constant because the log replay must recognize this tool's calls by
+ * name: the plugin's own `name` above is a different string, and comparing
+ * against the wrong one silently skipped every call, so no patch could be
+ * replayed from its arguments (caught by tests/replay-args.spec.ts).
+ */
+const ARTIFACT_TOOL_NAME = 'artifact'
 /** Required capabilities: the tool registry and the slash-command registry
  *  (artifact interaction submission and user-side revert), plus `webServer`
  *  for the canvas picker's full-history artifact index route
@@ -362,16 +373,45 @@ function ensureFromLog(agent: Agent, store: ArtifactStore, id: string | undefine
     : typeof sessionAny.ownEvents === 'function'
       ? sessionAny.ownEvents()
       : sessionAny.events ?? []
+  // Tool-call ARGUMENTS by callId. A `patch` no longer carries its resulting
+  // source in the meta, so the replay needs the cause: `old_string`/`new_string`
+  // (and `replace_all`), which the log stores as the tool call. Both event kinds
+  // are walked in one pass, and a result always FOLLOWS its call in log order,
+  // so the map is populated by the time the meta is reached.
+  const callArgs = new Map<string, unknown>()
   for (const event of events) {
+    if (event.type === 'tool/call') {
+      const data = event.data as { callId?: unknown; name?: unknown; arguments?: unknown } | undefined
+      if (typeof data?.callId !== 'string' || data.name !== ARTIFACT_TOOL_NAME) continue
+      // `arguments` is a JSON STRING in the log (the host stores the wire form).
+      const raw = data.arguments
+      if (typeof raw !== 'string') continue
+      try {
+        callArgs.set(data.callId, JSON.parse(raw))
+      } catch {
+        // A malformed argument blob only costs the ability to replay THAT patch
+        // from its cause; the fold flags the artifact as diverged rather than
+        // failing the whole reconstruction.
+      }
+      continue
+    }
     if (event.type !== 'tool/result') continue
     // The presentation meta rides at the EVENT level (`data.meta`); older
     // shapes may nest it under the message — accept both.
-    const data = event.data as { meta?: unknown; message?: { meta?: unknown } } | undefined
+    const data = event.data as { meta?: unknown; message?: { meta?: unknown }; toolCallId?: unknown; message2?: unknown } | undefined
     const meta = data?.meta ?? data?.message?.meta
     if (meta === null || typeof meta !== 'object') continue
     const candidate = meta as Record<string, unknown>
     if (typeof candidate.op !== 'string' || !ARTIFACT_OPS.includes(candidate.op as ArtifactOp)) continue
     if (typeof candidate.id !== 'string') continue
+    if (candidate.op === 'patch') {
+      const callId = (data as { message?: { toolCallId?: unknown } } | undefined)?.message?.toolCallId
+      const args = typeof callId === 'string' ? callArgs.get(callId) : undefined
+      const patch = readPatchArgs(args)
+      // Attach the cause only when it is actually a patch; a missing one leaves
+      // the fold to flag divergence instead of silently doing nothing.
+      if (patch !== undefined) candidate.patch = patch
+    }
     metas.push(candidate as unknown as ArtifactMetaLike)
   }
   for (const [rebuiltId, snapshot] of rebuildFromMetas(metas)) {
@@ -735,7 +775,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   })
 
   ctx.tools.register(defineTool({
-    name: 'artifact',
+    name: ARTIFACT_TOOL_NAME,
     description:
       'Create and iteratively refine an interactive HTML artifact that renders LIVE in the GUI inside a sandboxed iframe. '
       + 'VERSIONING IS EXPLICIT: `create` starts an artifact and saves it as 版本 1; `patch` applies an edit-style string '
@@ -949,8 +989,23 @@ export function apply(ctx: Context, config: Config = {}): void {
         switch (value.op) {
           case 'create':
             return { op: 'create', id: value.id, version: value.version, html: value.html, ...value.title === undefined ? {} : { title: value.title }, ...value.interactive === undefined ? {} : { interactive: value.interactive } }
+          // NO `html`. A patch is the highest-frequency op and its effect is
+          // fully described by the tool call's arguments, which the log already
+          // stores: on a real session, projecting the post-patch source cost
+          // 7.87 MB of a 29.49 MB log for 139 patches whose arguments were
+          // 0.16 MB. `bytes` + `hash` let a replay VERIFY that reproducing the
+          // patch from those arguments landed on the same content.
+          //
+          // The win is MEMORY, not disk — measured: the compressed log is
+          // unchanged (~0%, zstd already dedupes the near-identical copies),
+          // while parsing the events costs 193.4 MB of heap with them and
+          // 152.7 MB without (40.7 MB / 21% on a heavy session).
           case 'patch':
-            return { op: 'patch', id: value.id, version: value.version, html: value.html, applied: value.applied }
+            return {
+              op: 'patch', id: value.id, version: value.version, applied: value.applied,
+              bytes: new TextEncoder().encode(value.html).byteLength,
+              hash: contentHash(value.html),
+            }
           case 'save':
             return { op: 'save', id: value.id, version: value.version, html: value.html, unchanged: value.unchanged, ...value.title === undefined ? {} : { title: value.title } }
           case 'revert':

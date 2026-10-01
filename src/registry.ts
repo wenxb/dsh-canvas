@@ -61,13 +61,6 @@ export interface ArtifactSummary {
   origin?: { sessionId: string; artifactId: string }
 }
 
-/** Replacement outcome of one `patch` op. */
-export interface ReplaceOutcome {
-  /** The full source after the replacement(s). */
-  html: string
-  /** How many occurrences were replaced (0 means none found). */
-  count: number
-}
 
 /** Result of applying a patch to an artifact. */
 export interface PatchResult {
@@ -87,38 +80,14 @@ export interface SaveResult {
 
 export const MAX_VERSIONS = 20
 
+import { contentHash, replaceOccurrences, type PatchArgs } from './patch.ts'
+
 /**
- * Replace occurrences of `oldString` in `source`. Mirrors the file `edit`
- * tool's semantics: plain first-index match (never regex), replace the first
- * occurrence or all of them, and treat an identical old/new pair as a no-op.
- * @param source - the current artifact source.
- * @param oldString - the exact substring to find (non-empty).
- * @param newString - the replacement text.
- * @param replaceAll - replace every occurrence instead of only the first.
- * @returns the replacement outcome; `count` is 0 when nothing matched.
+ * Literal patch application. The implementation lives in `./patch.ts` because
+ * the CLIENT's timeline fold needs the identical algorithm — one copy, so the
+ * two sides cannot drift apart.
  */
-export function replaceOccurrences(source: string, oldString: string, newString: string, replaceAll: boolean): ReplaceOutcome {
-  if (oldString.length === 0) return { html: source, count: 0 }
-  if (oldString === newString) return { html: source, count: 0 }
-  let count = 0
-  let html = source
-  if (!replaceAll) {
-    const index = html.indexOf(oldString)
-    if (index === -1) return { html: source, count: 0 }
-    return { html: html.slice(0, index) + newString + html.slice(index + oldString.length), count: 1 }
-  }
-  let cursor = 0
-  let out = ''
-  for (;;) {
-    const index = html.indexOf(oldString, cursor)
-    if (index === -1) break
-    out += html.slice(cursor, index) + newString
-    cursor = index + oldString.length
-    count++
-  }
-  if (count === 0) return { html: source, count: 0 }
-  return { html: out + html.slice(cursor), count }
-}
+export { replaceOccurrences, type ReplaceOutcome } from './patch.ts'
 
 /**
  * Truncate an HTML source to a UTF-8 byte cap without splitting a character.
@@ -192,6 +161,14 @@ export interface ArtifactMetaLike {
   applied?: number
   truncated?: boolean
   interactive?: boolean
+  /**
+   * For `patch`: the arguments that PRODUCED this state, so a log that does not
+   * carry the resulting source can still be replayed. See {@link contentHash}
+   * for the check that keeps this honest.
+   */
+  patch?: PatchArgs
+  /** For `patch`: fingerprint of the resulting working copy, for verification. */
+  hash?: string
 }
 
 /**
@@ -208,8 +185,15 @@ export function rebuildFromMetas(metas: readonly ArtifactMetaLike[]): Map<string
   interactive?: boolean
   deleted?: boolean
   versions: ArtifactVersion[]
+  /**
+   * Set when a patch could NOT be reproduced from its arguments (or reproduced
+   * to something the recorded fingerprint disagrees with). A diverged snapshot
+   * must NOT be adopted over a good store/disk copy — it is a best-effort
+   * reconstruction, not the truth.
+   */
+  diverged?: boolean
 }> {
-  const states = new Map<string, { html: string; title?: string; interactive?: boolean; deleted?: boolean; versions: ArtifactVersion[] }>()
+  const states = new Map<string, { html: string; title?: string; interactive?: boolean; deleted?: boolean; versions: ArtifactVersion[]; diverged?: boolean }>()
   for (const meta of metas) {
     if (typeof meta.id !== 'string' || meta.id === '') continue
     let state = states.get(meta.id)
@@ -246,6 +230,34 @@ export function rebuildFromMetas(metas: readonly ArtifactMetaLike[]): Map<string
       // The log keeps the destroy and we replay it the same way — the recovery
       // target is still a soft-deleted artifact.
       state.deleted = true
+      continue
+    }
+    // A PATCH may arrive with only its arguments and a fingerprint: the log no
+    // longer stores a full copy of the post-patch working copy (measured at
+    // 7.87 MB of one real 29.49 MB log, while the same patches' arguments were
+    // 0.16 MB). Reproduce the effect from the cause.
+    if (meta.op === 'patch' && typeof meta.html !== 'string') {
+      if (meta.patch === undefined) {
+        // Nothing to replay from (a truncated/foreign meta). Leave the working
+        // copy as the last known state and flag it, rather than inventing one.
+        state.diverged = true
+        continue
+      }
+      const outcome = replaceOccurrences(state.html, meta.patch.oldString, meta.patch.newString, meta.patch.replaceAll)
+      if (outcome.count === 0) {
+        // A successful patch always changed something (a zero-count patch throws
+        // PatchNotFoundError and is logged as an error, not as this meta). So a
+        // zero count means OUR working copy is not the one the patch applied to.
+        state.diverged = true
+        continue
+      }
+      state.html = outcome.html
+      if (meta.hash !== undefined && contentHash(state.html) !== meta.hash) {
+        // Fingerprint disagreement: the reconstruction is not what the tool
+        // produced. Keep it (it is still the best available) but mark it so a
+        // caller with real bytes prefers those.
+        state.diverged = true
+      }
       continue
     }
     if (typeof meta.html !== 'string') continue
@@ -456,7 +468,12 @@ export class ArtifactStore {
    * @param snapshot - the log-derived state.
    * @returns whether the store adopted the incoming snapshot.
    */
-  adoptReplay(id: string, snapshot: { html: string; title?: string; interactive?: boolean; deleted?: boolean; origin?: { sessionId: string; artifactId: string }; versions: ArtifactVersion[] }): boolean {
+  adoptReplay(id: string, snapshot: { html: string; title?: string; interactive?: boolean; deleted?: boolean; origin?: { sessionId: string; artifactId: string }; versions: ArtifactVersion[]; diverged?: boolean }): boolean {
+    // A DIVERGED reconstruction is best-effort, not truth: its patches could not
+    // be reproduced from their arguments. It may still be the only copy (a fresh
+    // process with an empty store), so it is adopted then — but it must never
+    // overwrite content we already hold from the disk cache or live edits.
+    if (snapshot.diverged === true && this.states.has(id)) return false
     const existing = this.states.get(id)
     if (existing === undefined) {
       this.restore(id, snapshot)

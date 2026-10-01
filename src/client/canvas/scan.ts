@@ -8,7 +8,8 @@
  * @module
  */
 import type { ArtifactCardView, HtmlArtifactOp } from '../contract.ts'
-import { artifactCardModel, cardVersion } from '../contract.ts'
+import { artifactArgs, artifactCardModel, cardVersion } from '../contract.ts'
+import { applyPatch, patchArgsOf, type PatchArgs } from '../../patch.ts'
 
 /** One settled artifact op found in the timeline. */
 export interface ArtifactEntry {
@@ -23,6 +24,13 @@ export interface ArtifactEntry {
   /** Saved version number when the card carries one (`version`/legacy). */
   version: number | undefined
   html: string | undefined
+  /**
+   * For a `patch` whose meta carries no resulting source: the arguments that
+   * produced it, read from the tool call. The fold applies them so the canvas
+   * still shows the post-patch working copy without the log storing a full copy
+   * of it per edit (see src/patch.ts for the measured reason).
+   */
+  patch?: PatchArgs
   title: string | undefined
   /** Interaction-data expectation, when the card declares one. */
   interactive: boolean | undefined
@@ -71,7 +79,15 @@ export function scanArtifactEntries(nodes: readonly unknown[]): ArtifactEntry[] 
     // `list` cards carry no single artifact id — nothing for the panel,
     // but their persist dir (when the server wrote one) is remembered.
     if (view.op === 'list') continue
-    const htmlOp = view.op !== 'destroy' ? view as Extract<ArtifactCardView, { html: string }> : undefined
+    const htmlOp = view.op !== 'destroy' ? view as Extract<ArtifactCardView, { html?: string }> : undefined
+    // A patch's cause lives on the CALL (`block.call.argsRaw`); the result meta
+    // no longer repeats the resulting source.
+    // `artifactArgs` returns NORMALIZED (camelCase) fields, so it must not be
+    // fed to the wire-shape reader.
+    const parsed = view.op === 'patch' ? artifactArgs(node as never) : undefined
+    const patch = view.op === 'patch' && parsed !== undefined
+      ? patchArgsOf(parsed.oldString, parsed.newString, parsed.replaceAll)
+      : undefined
     entries.push({
       seq: typeof record.seq === 'number' ? record.seq : 0,
       time: typeof record.time === 'number' ? record.time : 0,
@@ -79,7 +95,8 @@ export function scanArtifactEntries(nodes: readonly unknown[]): ArtifactEntry[] 
       op: view.op,
       id: view.id,
       version: htmlOp === undefined ? undefined : cardVersion(htmlOp),
-      html: htmlOp?.html,
+      html: typeof htmlOp?.html === 'string' ? htmlOp.html : undefined,
+      ...patch === undefined ? {} : { patch },
       title: htmlOp?.title,
       interactive: 'interactive' in view && typeof view.interactive === 'boolean' ? view.interactive : undefined,
       isError: record.isError === true,
@@ -198,8 +215,19 @@ export function buildTimelines(entries: readonly ArtifactEntry[]): Map<string, A
       } else {
         timeline.workingDirty = true
       }
-    } else if (entry.op === 'patch' && entry.html !== undefined) {
-      timeline.workingDirty = true
+    } else if (entry.op === 'patch') {
+      // Reproduce the patch from its arguments when the meta carries no source.
+      // Without this the canvas would keep showing the last checkpointed content
+      // while the store held newer edits — the display would silently lag the
+      // artifact, which is worse than the log bytes it saves.
+      if (entry.html !== undefined) {
+        timeline.workingHtml = entry.html
+      } else if (entry.patch !== undefined && timeline.workingHtml !== undefined) {
+        const outcome = applyPatch(timeline.workingHtml, entry.patch)
+        if (outcome.count > 0) timeline.workingHtml = outcome.html
+      }
+      // A patch after a checkpoint is by definition unsaved work.
+      if (!timeline.destroyed) timeline.workingDirty = true
     }
   }
   return timelines

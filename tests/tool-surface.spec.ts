@@ -16,6 +16,14 @@
  */
 import { describe, expect, it } from 'vitest'
 import { ARTIFACT_OPS, apply, presentCallForArtifact } from '../src/index.ts'
+import { contentHash } from '../src/patch.ts'
+
+/**
+ * A realistic working copy. Real artifacts in the observed data run 15-150 KB
+ * (the largest single artifact on disk was 149124 bytes), and it is their SIZE
+ * that made per-patch re-projection expensive.
+ */
+const FULL = `<body>${'<p>content</p>'.repeat(2000)}</body>`
 
 /** One JSON-Schema property, as `defineTool` normalizes it. */
 interface SchemaProperty {
@@ -29,7 +37,10 @@ interface CapturedTool {
   name: string
   description: string
   parameters: { type: string; properties: Record<string, SchemaProperty>; required: readonly string[] }
-  output: { schema: { properties: Record<string, SchemaProperty> } }
+  output: {
+    schema: { properties: Record<string, SchemaProperty> }
+    presentationMeta?: (args: unknown, value: unknown) => unknown
+  }
   presentCall?: (args: unknown) => unknown
 }
 
@@ -125,5 +136,71 @@ describe('presentCallForArtifact', () => {
   it('names the source session on an import card', () => {
     const card = presentCallForArtifact({ op: 'import', session_id: 's-9', artifact_id: 'art-2' })
     expect(card?.title).toContain('s-9/art-2')
+  })
+})
+/*
+ * THE LOG-BUDGET CONTRACT.
+ *
+ * `presentationMeta` is what actually enters the session log (it rides the
+ * tool-result event as `data.meta`). A `patch` used to project the FULL
+ * resulting working copy: 7.87 MB of one real 29.49 MB log across 139 patches,
+ * while the same patches' tool-call ARGUMENTS — also in the log — were 0.16 MB.
+ *
+ * WHERE THE COST ACTUALLY IS, measured rather than assumed: NOT on disk (zstd
+ * with a large window dedupes the near-identical copies; recompressing with and
+ * without them moved the file ~0%), but in MEMORY — 193.4 MB of heap to parse
+ * the events with the copies, 152.7 MB without (40.7 MB / 21% on a heavy
+ * session). So these tests pin the projection shape that avoids the heap cost.
+ *
+ * These tests pin the shape that fixes it, because the failure mode is silent:
+ * re-adding `html` here costs megabytes per session and NOTHING else breaks.
+ * The replay path is covered in tests/replay-args.spec.ts.
+ */
+describe('a patch does not project its resulting source into the log', () => {
+  const TOOL = captureArtifactTool()
+  const project = (): Record<string, unknown> =>
+    TOOL.output.presentationMeta?.({}, { op: 'patch', id: 'art-a', version: 1, html: FULL, applied: 2 }) as Record<string, unknown>
+
+  it('omits html entirely', () => {
+    // The whole point: no copy of the working copy in the event.
+    expect(project()).not.toHaveProperty('html')
+  })
+
+  it('still keeps everything a replay and the card need', () => {
+    const meta = project()
+    expect(meta.op).toBe('patch')
+    expect(meta.id).toBe('art-a')
+    expect(meta.version).toBe(1)
+    expect(meta.applied).toBe(2)
+  })
+
+  it('carries a byte count and a fingerprint so the reproduction is verifiable', () => {
+    const meta = project()
+    // Without the fingerprint a replay could silently rebuild the WRONG
+    // working copy; with it, divergence is detectable.
+    expect(meta.bytes).toBe(new TextEncoder().encode(FULL).byteLength)
+    expect(meta.hash).toBe(contentHash(FULL))
+    expect(typeof meta.hash).toBe('string')
+  })
+
+  it('is a negligible fraction of the source it no longer repeats', () => {
+    const projected = JSON.stringify(project()).length
+    // Against a realistic artifact the meta is ~0.2% of the source. Pinned as a
+    // ratio, not a byte count, so a future field addition is caught if it grows
+    // the meta out of proportion.
+    expect(projected).toBeLessThan(200)
+    expect(projected * 100).toBeLessThan(FULL.length)
+    // Sanity-check the fixture itself: if FULL ever shrinks to a toy size this
+    // ratio assertion stops meaning anything.
+    expect(FULL.length).toBeGreaterThan(10_000)
+  })
+
+  it('still projects SOURCE for the ops where the source IS the state', () => {
+    // create/save/revert remain the log's content checkpoints: dropping their
+    // html would make the artifact unreconstructable.
+    for (const op of ['create', 'save', 'revert'] as const) {
+      const meta = TOOL.output.presentationMeta?.({}, { op, id: 'art-a', version: 1, html: '<p>x</p>', title: 'T' }) as Record<string, unknown>
+      expect(meta.html).toBe('<p>x</p>')
+    }
   })
 })
