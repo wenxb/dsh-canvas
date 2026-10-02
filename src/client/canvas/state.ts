@@ -87,6 +87,7 @@ function transcriptOf(snapshot: unknown): ConversationSnapshot {
 }
 import { extractStreamingHtml, extractStreamingTitle, isStreamingCreate } from '../stream/extract.ts'
 import { buildTimelines, currentCheckpointIndex, scanArtifactEntries, scanPersistDir, type ArtifactCheckpoint, type ArtifactEntry, type ArtifactTimeline } from './scan.ts'
+import { isArtifactToolName } from '../../tool-name.ts'
 
 /** Settled version events newer than this are treated as live activity. */
 const VERSION_EVENT_WINDOW_MS = 15_000
@@ -193,7 +194,7 @@ function runningOpOf(argsRaw: string): { op: string; id: string } | null {
 }
 
 function streamOfCall(call: RunningToolCall): StreamPreview | null {
-  if (call.name !== 'artifact') return null
+  if (!isArtifactToolName(call.name)) return null
   if (!isStreamingCreate(call.argsRaw)) return null
   return {
     callId: call.callId,

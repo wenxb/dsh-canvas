@@ -35,6 +35,7 @@ type JsonValue = string | number | boolean | null | { [key: string]: JsonValue }
 import { parseImportRequest, parseRevertRequest, parseSubmissionPayload, renderInteractionSubmission, renderSubmissionSummary, resolveImportContent } from './interaction.ts'
 import { ArtifactStore, UnknownVersionError, rebuildFromMetas, truncateHtml, type ArtifactMetaLike } from './registry.ts'
 import { contentHash, readPatchArgs } from './patch.ts'
+import { ARTIFACT_TOOL_NAME, isArtifactToolName } from './tool-name.ts'
 import { DEFAULT_PERSIST_ROOT, makePersister, persistDirFor, type ArtifactPersistence } from './persistence.ts'
 import { LIBRARY_MAX_ARTIFACTS, libraryListingPayload, libraryVersionsPayload, readLibraryArtifact, scanLibrary } from './library.ts'
 import {
@@ -50,15 +51,11 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 /** Cordis plugin name. */
 export const name = 'dsh-canvas'
 
-/**
- * The wire name of the artifact tool.
- *
- * A SINGLE constant because the log replay must recognize this tool's calls by
- * name: the plugin's own `name` above is a different string, and comparing
- * against the wrong one silently skipped every call, so no patch could be
- * replayed from its arguments (caught by tests/replay-args.spec.ts).
- */
-const ARTIFACT_TOOL_NAME = 'artifact'
+// The tool's wire name lives in ./tool-name.ts, together with the LEGACY names
+// that must keep resolving. The replay recognizes this tool's calls BY NAME, so
+// matching against a single string silently skipped every call written under
+// another one and no patch could be replayed from its arguments (caught by
+// tests/replay-args.spec.ts, which now covers both names).
 /** Required capabilities: the tool registry and the slash-command registry
  *  (artifact interaction submission and user-side revert), plus `webServer`
  *  for the canvas picker's full-history artifact index route
@@ -382,7 +379,7 @@ function ensureFromLog(agent: Agent, store: ArtifactStore, id: string | undefine
   for (const event of events) {
     if (event.type === 'tool/call') {
       const data = event.data as { callId?: unknown; name?: unknown; arguments?: unknown } | undefined
-      if (typeof data?.callId !== 'string' || data.name !== ARTIFACT_TOOL_NAME) continue
+      if (typeof data?.callId !== 'string' || !isArtifactToolName(data.name)) continue
       // `arguments` is a JSON STRING in the log (the host stores the wire form).
       const raw = data.arguments
       if (typeof raw !== 'string') continue

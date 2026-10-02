@@ -65,12 +65,15 @@ const CREATE_HTML = '<body><h1>title</h1></body>'
  * way: a `tool/call` with the arguments and a `tool/result` whose meta has NO
  * source, only a byte count and a fingerprint.
  */
-function patchedLog(options: { withArgs?: boolean; hash?: string } = {}): Event[] {
+function patchedLog(options: { withArgs?: boolean; hash?: string; toolName?: string } = {}): Event[] {
+  // Defaults to the LEGACY name on purpose: every test in this file then doubles
+  // as proof that a log written before the rename still replays.
+  const toolName = options.toolName ?? 'artifact'
   const patched = '<body><h1>EDITED</h1></body>'
   const events: Event[] = [
     {
       type: 'tool/call', seq: 1,
-      data: { callId: 'call-create', name: 'artifact', arguments: JSON.stringify({ op: 'create', html: CREATE_HTML, title: 'T' }) },
+      data: { callId: 'call-create', name: toolName, arguments: JSON.stringify({ op: 'create', html: CREATE_HTML, title: 'T' }) },
     },
     {
       type: 'tool/result', seq: 2,
@@ -84,7 +87,7 @@ function patchedLog(options: { withArgs?: boolean; hash?: string } = {}): Event[
     events.push({
       type: 'tool/call', seq: 3,
       data: {
-        callId: 'call-patch', name: 'artifact',
+        callId: 'call-patch', name: toolName,
         arguments: JSON.stringify({ op: 'patch', id: 'art-a', old_string: '<h1>title</h1>', new_string: '<h1>EDITED</h1>' }),
       },
     })
@@ -139,6 +142,13 @@ describe('a log whose patch carries only its cause still replays', () => {
     // and — because every replay-backed op walks this path — ONE patch in the log
     // broke read/save/revert/export/list/destroy for the whole session.
     const value = await runWithLog(frozenLog(patchedLog()), { op: 'read', id: 'art-a' })
+    expect(value.html).toBe('<body><h1>EDITED</h1></body>')
+  })
+
+  it('replays the SAME log written under the CURRENT tool name', async () => {
+    // Both names must resolve: the rename (artifact → canvas) cannot strand the
+    // logs written on either side of it.
+    const value = await runWithLog(patchedLog({ toolName: 'canvas' }), { op: 'read', id: 'art-a' })
     expect(value.html).toBe('<body><h1>EDITED</h1></body>')
   })
 

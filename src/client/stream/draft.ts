@@ -22,6 +22,7 @@ function conversationContextKey(kind: string, id: string): string {
   return `${kind.length}:${kind}${id}`
 }
 import { extractStreamingHtml, extractStreamingTitle, isStreamingCreate } from './extract.ts'
+import { isArtifactToolName } from '../../tool-name.ts'
 
 /** The wire shape of one streamed artifact call inside the Definition state. */
 interface DraftCall {
@@ -117,7 +118,7 @@ function stepId(event: { data: { turn: number; step: number } }): string {
 function asArtifactToolCall(block: unknown): { id: string; arguments: string } | null {
   if (block === null || typeof block !== 'object') return null
   const candidate = block as Record<string, unknown>
-  if (candidate.type !== 'tool-call' || candidate.name !== 'artifact') return null
+  if (candidate.type !== 'tool-call' || !isArtifactToolName(candidate.name)) return null
   if (typeof candidate.id !== 'string' && typeof candidate.id !== 'number') return null
   if (typeof candidate.arguments !== 'string') return null
   return { id: String(candidate.id), arguments: candidate.arguments }
@@ -229,7 +230,7 @@ export const artifactDraftDefinition: ConversationNodeDefinition<ArtifactDraftSt
     if (event.type === 'step/start') return { id: stepId(event), role: 'start' }
     if (isLiveChunk(event)) {
       const chunk = event.data.chunk
-      if (chunk.type === 'tool-call-delta' && chunk.name === 'artifact') {
+      if (chunk.type === 'tool-call-delta' && isArtifactToolName(chunk.name)) {
         return { id: stepId(event), role: 'update' }
       }
       if (chunk.type === 'block-end') {
@@ -237,7 +238,7 @@ export const artifactDraftDefinition: ConversationNodeDefinition<ArtifactDraftSt
       }
       return null
     }
-    if (event.type === 'tool/call' && event.data.name === 'artifact') {
+    if (event.type === 'tool/call' && isArtifactToolName(event.data.name)) {
       return { id: stepId(event), role: 'update' }
     }
     if (event.type === 'tool/result') {
@@ -282,7 +283,7 @@ export const artifactDraftDefinition: ConversationNodeDefinition<ArtifactDraftSt
     for (const match of context.matches) {
       if (!isLiveChunk(match.event)) continue
       const chunk = match.event.data.chunk
-      if (chunk.type === 'tool-call-delta' && chunk.name === 'artifact') {
+      if (chunk.type === 'tool-call-delta' && isArtifactToolName(chunk.name)) {
         anchorSeq = match.event.seq
         break
       }

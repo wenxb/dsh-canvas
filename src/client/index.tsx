@@ -21,6 +21,7 @@ import { ArtifactRow } from './ArtifactRow.tsx'
 import { CanvasTabContent } from './canvas/panel.tsx'
 import { CANVAS_TAB_TYPE, canvasBridge, type SidebarFace } from './canvas/state.ts'
 import { IconCode } from './icons.tsx'
+import { ARTIFACT_TOOL_NAMES } from '../tool-name.ts'
 
 /** The canvas tab body with the native-close tracker. better-sidebar ≥0.19
  *  mounts tabs in the DSH native sidebar-right panel, whose adapter fires NO
@@ -50,10 +51,14 @@ export const inject = ['slots', 'uiConversation', 'sessions', 'betterSidebar']
  */
 export function apply(ctx: Context): void {
   ctx.slots.inject('tool.call.toolview', function* () {
-    yield ctx.slots.register({
-      name: 'tool.call.toolview',
-      key: 'artifact',
-    }, ArtifactRow)
+    // ONE registration PER NAME: this slot is keyed by tool name, so a card for a
+    // call logged before the rename needs its own key to keep rendering.
+    for (const key of ARTIFACT_TOOL_NAMES) {
+      yield ctx.slots.register({
+        name: 'tool.call.toolview',
+        key,
+      }, ArtifactRow)
+    }
   })
   // The canvas bridge: current-session tracking + command delivery for the
   // plugin lifetime. Also exposed for manual debugging / e2e probing.

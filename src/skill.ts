@@ -24,8 +24,8 @@
  * @module
  */
 
-/** The skill name the model calls: `skill({ name: 'html-artifact' })`. */
-export const ARTIFACT_SKILL_NAME = 'html-artifact'
+/** The skill name the model calls: `skill({ name: 'canvas' })`. */
+export const ARTIFACT_SKILL_NAME = 'canvas'
 
 /**
  * Provenance bucket for this skill. `'runtime'` is the category for a skill a

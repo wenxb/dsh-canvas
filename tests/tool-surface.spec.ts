@@ -80,8 +80,11 @@ function captureArtifactTool(): CapturedTool {
 describe('artifact tool surface — every op is reachable', () => {
   const tool = captureArtifactTool()
 
-  it('registers exactly one tool named `artifact`', () => {
-    expect(tool.name).toBe('artifact')
+  it('registers exactly one tool, under its CURRENT name', () => {
+    // The rename to dsh-canvas moved the tool from `artifact` to `canvas`. The old
+    // name is still ACCEPTED when reading logs (see src/tool-name.ts), but it is
+    // never registered — a second registration would show up as two tools.
+    expect(tool.name).toBe('canvas')
   })
 
   it('the input `op` enum is exactly ARTIFACT_OPS (the bug that shipped)', () => {
