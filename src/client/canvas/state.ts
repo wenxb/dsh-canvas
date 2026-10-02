@@ -454,7 +454,13 @@ class CanvasBridge {
     this.cachedEntries = []
     this.clearRetry()
     this.retryAttempt = 0
-    this.hostListFetched = false
+    // Forget which session the index covered (and what it knew), so the next
+    // session reads its own. `hostTimelines` holds CONTENT and is cleared too.
+    this.hostIndexSession = undefined
+    this.hostIndexRequested = false
+    this.hostIndexPending = false
+    this.hostIndexIds = new Set()
+    this.hostIndexMisses = new Set()
     this.hostTimelines.clear()
     const sessions = activeSessions
     const id = activeSessionId
@@ -632,6 +638,10 @@ class CanvasBridge {
     // host index fills those in and MUST be re-applied after every rescan —
     // otherwise each ingest overwrites the merge and the picker empties again.
     this.applyHostTimelines()
+    // The window just changed, so this is where an artifact the index has never
+    // seen becomes visible. Asking here (instead of latching once on mount) is
+    // what makes the index self-healing for ordinary ops.
+    this.ensureHostIndexFresh()
     this.orderValue = [...this.timelinesValue.values()]
       .sort((a, b) => b.lastSeq - a.lastSeq)
       .map(timeline => timeline.id)
@@ -845,7 +855,41 @@ class CanvasBridge {
    * until the user scrolls the chat far enough for the window to reach it
    * (the picker's own hint says as much).
    */
-  private hostListFetched = false
+  /**
+   * The session the last successful host-index read covers. NOT a one-shot
+   * latch: a permanent "already fetched" flag was the bug (an artifact created
+   * without a visible event stayed invisible until a page reload). Re-reading is
+   * instead driven by {@link ensureHostIndexFresh}, and the in-flight guard
+   * below is what keeps a render storm from issuing duplicate requests.
+   */
+  private hostIndexSession: SessionId | undefined
+  /** A read is in flight — deduplicates, and is the ONLY thing that blocks one. */
+  private hostIndexFetching = false
+  /**
+   * A read was requested at least once (the canvas tab mounted / opened).
+   *
+   * The freshness rule is only worth running for a session whose index anyone
+   * actually wants: ingestion happens while the canvas is CLOSED too, and
+   * fetching an index nobody is looking at is wasted work.
+   */
+  private hostIndexRequested = false
+  /**
+   * The index was invalidated while a read was in flight. Coalesced into exactly
+   * ONE follow-up read: without it, an import that lands mid-read would be
+   * silently dropped, which is the same class of bug as the old latch.
+   */
+  private hostIndexPending = false
+  /** Ids the last successful read knew about (staleness detection). */
+  private hostIndexIds = new Set<string>()
+  /**
+   * Ids that already triggered a staleness re-read.
+   *
+   * Each unexpected id costs AT MOST ONE extra read. Without this the rule would
+   * loop when the host keeps not reporting an id — exactly what happens while
+   * the host half is still loading and the route 403s; a permanent latch hid
+   * that, but an unconditional re-read would spin.
+   */
+  private hostIndexMisses = new Set<string>()
   /** Artifact data supplied by the host route, keyed by id. Kept apart from
    *  `timelinesValue` because the window rescan rebuilds that map wholesale. */
   private hostTimelines = new Map<string, {
@@ -859,18 +903,48 @@ class CanvasBridge {
    *  even when the tab was opened without going through `openUi` (the "+" guide
    *  menu), because mount IS open on native hosts. */
   ensureHostIndex(): void {
-    this.refreshHostList()
+    this.hostIndexRequested = true
+    this.ensureHostIndexFresh()
+  }
+
+  /**
+   * Keep the host index FRESH rather than loading it once.
+   *
+   * WHY THIS REPLACED A LATCH: `refreshHostList` used to latch after its first
+   * successful read, so the index could only ever get STALER — an artifact the
+   * window could not see (a server-side import) stayed invisible until a full
+   * page reload, and every later fix had to reach in and poke the flag.
+   *
+   * The rule is now the general one: re-read when this session's index has not
+   * been read yet, or when the window knows an artifact the index does not. That
+   * second clause is what makes it SELF-HEALING for ordinary ops — a create
+   * whose event arrived before the index did triggers exactly one re-read, and
+   * each id is allowed only one (see `hostIndexMisses`).
+   */
+  private ensureHostIndexFresh(): void {
+    const id = activeSessionId
+    if (id === undefined || !this.hostIndexRequested) return
+    if (this.hostIndexSession !== id) {
+      this.refreshHostList()
+      return
+    }
+    let missed = false
+    for (const candidate of this.timelinesValue.keys()) {
+      if (this.hostIndexIds.has(candidate) || this.hostIndexMisses.has(candidate)) continue
+      this.hostIndexMisses.add(candidate)
+      missed = true
+    }
+    if (missed) this.refreshHostList()
   }
 
   /**
    * Re-read the host index after an IMPORT, which mints its artifact SERVER-SIDE.
    *
-   * `refreshHostList` latches after one successful read (the index exists to
-   * cover a truncated window, and re-reading it on every render would be
-   * wasteful), so a newly imported artifact was invisible until a page reload —
-   * the canvas kept showing the old contents right after the user imported
-   * something. An import is precisely the case where the client knows its index
-   * is stale, so it clears the latch and re-reads, then OPENS whatever is new.
+   * An import is the one mutation the FRESHNESS RULE cannot detect: the artifact
+   * is minted server-side, so no tool-result event reaches the window and
+   * `ensureHostIndexFresh` has nothing to notice. So the caller states the fact
+   * instead — the index for this session is invalid — which the same one
+   * mechanism honours. No flag is poked; there is no latch left to poke.
    *
    * The minted id is deliberately unknowable here: the import command picks it
    * server-side (that is why the command wakes the model with it). So the
@@ -878,7 +952,9 @@ class CanvasBridge {
    */
   onImported(): void {
     const known = new Set(this.timelinesValue.keys())
-    this.hostListFetched = false
+    // Invalidate this session's index; the read below repopulates it.
+    this.hostIndexRequested = true
+    this.hostIndexSession = undefined
     this.refreshHostList(() => {
       // Newest first, so an import into a session that already had artifacts
       // still lands on the imported one rather than an arbitrary new row.
@@ -896,29 +972,43 @@ class CanvasBridge {
 
   private refreshHostList(onApplied?: () => void): void {
     const id = activeSessionId
-    if (id === undefined || this.hostListFetched) {
+    if (id === undefined) {
       onApplied?.()
       return
     }
-    this.hostListFetched = true
+    if (this.hostIndexFetching) {
+      // Do not DROP the request: run one more read when this one settles.
+      this.hostIndexPending = true
+      onApplied?.()
+      return
+    }
+    this.hostIndexFetching = true
+    this.hostIndexRequested = true
+    // A read that never lands must not leave the guard set, or the index would
+    // be permanently unreadable (the old latch's failure mode).
+    const finish = (): void => {
+      this.hostIndexFetching = false
+      onApplied?.()
+      if (this.hostIndexPending) {
+        this.hostIndexPending = false
+        this.refreshHostList()
+      }
+    }
     void fetch(`/artifact/api/list?sessionId=${encodeURIComponent(id)}`)
       .then(response => response.ok ? response.json() : undefined)
       .then(body => {
-        // A failed attempt must stay RETRYABLE: the route 403s until the host
-        // half is loaded, and a stale bundle / momentary failure would
-        // otherwise disable the index for the rest of the session, silently
-        // reverting the picker to the truncated window (the exact bug this
-        // index exists to fix). Only a SUCCESSFUL, non-empty read latches.
-        if (!Array.isArray((body as { artifacts?: unknown[] } | undefined)?.artifacts)) {
-          this.hostListFetched = false
-          onApplied?.()
-          return
-        }
+        // Every failure path stays RETRYABLE — the route 403s until the host half
+        // is loaded, and a stale bundle or momentary failure must not disable the
+        // index for the rest of the session (that silently reverts the picker to
+        // the truncated window, the exact bug this index exists to fix).
         const artifacts = (body as { ok?: boolean; artifacts?: unknown[] } | undefined)?.artifacts
         if (!Array.isArray(artifacts)) {
-          onApplied?.()
+          finish()
           return
         }
+        // What this read covered, so `ensureHostIndexFresh` can tell whether a
+        // later window artifact is something the index has never seen.
+        const seen = new Set<string>()
         for (const raw of artifacts) {
           if (raw === null || typeof raw !== 'object') continue
           const entry = raw as {
@@ -926,6 +1016,7 @@ class CanvasBridge {
             html?: unknown; interactive?: unknown; versions?: unknown
           }
           if (typeof entry.id !== 'string') continue
+          seen.add(entry.id)
           const versions = Array.isArray(entry.versions)
             ? (entry.versions as unknown[]).flatMap((raw) => {
                 if (raw === null || typeof raw !== 'object') return []
@@ -942,11 +1033,14 @@ class CanvasBridge {
             ...versions === undefined || versions.length === 0 ? {} : { versions },
           })
         }
+        // A SUCCESSFUL read is what marks this session covered — empty or not.
+        // An empty result is still a fact about the session ("it has none yet"),
+        // and treating it as "not read" is what made a later artifact need a
+        // reload.
+        this.hostIndexIds = seen
+        this.hostIndexSession = id
         if (this.hostTimelines.size === 0) {
-          // A legitimately empty session is fine to re-ask (cheap), so a later
-          // artifact — or a route that came up late — still gets picked up.
-          this.hostListFetched = false
-          onApplied?.()
+          finish()
           return
         }
         this.applyHostTimelines()
@@ -954,12 +1048,11 @@ class CanvasBridge {
           .sort((a, b) => b.lastSeq - a.lastSeq || b.lastTime - a.lastTime || (a.title ?? a.id).localeCompare(b.title ?? b.id))
           .map(timeline => timeline.id)
         this.publish()
-        onApplied?.()
+        finish()
       })
       .catch(() => {
         // offline / headless / route not yet registered — allow a later retry.
-        this.hostListFetched = false
-        onApplied?.()
+        finish()
       })
   }
 
@@ -1319,7 +1412,13 @@ class CanvasBridge {
     this.chatDisposer = undefined
     this.clearRetry()
     this.retryAttempt = 0
-    this.hostListFetched = false
+    // Forget which session the index covered (and what it knew), so the next
+    // session reads its own. `hostTimelines` holds CONTENT and is cleared too.
+    this.hostIndexSession = undefined
+    this.hostIndexRequested = false
+    this.hostIndexPending = false
+    this.hostIndexIds = new Set()
+    this.hostIndexMisses = new Set()
     this.hostTimelines.clear()
     activeSessions = undefined
     activeSessionId = undefined

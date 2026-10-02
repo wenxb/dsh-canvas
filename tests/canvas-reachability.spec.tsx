@@ -288,3 +288,152 @@ describe('the picker refreshes the canvas after a successful import', () => {
     expect(canvasBridge.getSnapshot().selectedId).toBe('art-src')
   })
 })
+
+/*
+ * THE FRESHNESS RULE — what replaced the one-shot latch.
+ *
+ * The latch (`hostListFetched`) meant the host index could only get STALER: it
+ * was read once and never again, so an artifact the window could not see stayed
+ * invisible until a page reload, and each later fix had to reach in and poke the
+ * flag. The rule is now "read once per session, then re-read whenever the window
+ * knows an artifact the index has never seen".
+ *
+ * These pin the parts that are easy to get wrong: that the rule actually fires,
+ * that it cannot loop, that a failure stays retryable, and that an invalidation
+ * arriving DURING a read is not silently dropped (which is the same class of bug
+ * as the latch).
+ */
+describe('the host index is kept fresh instead of latched', () => {
+  /** A settled artifact node the window scan will see. */
+  function node(seq: number, view: Record<string, unknown>): Record<string, unknown> {
+    return { kind: 'tool-result', seq, time: 1_000 + seq, callId: `c${seq}`, isError: false, resultView: { card: 'artifact', ...view } }
+  }
+
+  /** Bind the bridge with a fetch that never resolves unless released. */
+  function bind(options: { listingIds?: () => string[]; defer?: boolean } = {}) {
+    const reads: string[] = []
+    let release: (() => void) | undefined
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      const target = String(url)
+      if (!target.includes('/artifact/api/list')) {
+        return { ok: true, status: 200, json: async () => ({ ok: true, sessions: [] }) }
+      }
+      reads.push(target)
+      if (options.defer === true) await new Promise<void>(resolve => { release = resolve })
+      const ids = options.listingIds?.() ?? []
+      return { ok: true, status: 200, json: async () => ({ ok: true, artifacts: ids.map(id => ({ id, html: '<p>x</p>', savedVersion: 1 })) }) }
+    }))
+    const listeners = new Set<() => void>()
+    let current: Record<string, unknown> = { nodes: [], runningCalls: [] }
+    const session = {
+      getSnapshot: () => current,
+      subscribe: (fn: () => void) => { listeners.add(fn); return () => { listeners.delete(fn) } },
+      command: async () => ({ ok: true, value: { matched: true } }),
+    }
+    const sessions = {
+      list: { getSnapshot: () => ({ current: 's1', ids: ['s1'], byId: { s1: { id: 's1', displayTitle: '当前' } } }), subscribe: () => () => {} },
+      binding: () => ({ sessionId: 's1', session, ctx: {} }),
+    }
+    canvasBridge.init({ sessions, get: () => undefined } as never)
+    return {
+      reads,
+      push(nodes: unknown[]): void { current = { nodes, runningCalls: [] }; for (const fn of [...listeners]) fn() },
+      release: () => release?.(),
+    }
+  }
+
+  it('does NOT read before anything asks for the index', async () => {
+    // Ingestion happens while the canvas is closed too; fetching an index nobody
+    // is looking at is wasted work.
+    const harness = bind()
+    harness.push([node(1, { op: 'create', id: 'art-a', version: 1, html: '<p>a</p>' })])
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 5)) })
+    expect(harness.reads).toHaveLength(0)
+  })
+
+  it('self-heals: an artifact the index never saw triggers exactly ONE re-read', async () => {
+    let ids = ['art-seen']
+    const harness = bind({ listingIds: () => ids })
+    harness.push([node(1, { op: 'create', id: 'art-seen', version: 1, html: '<p>a</p>' })])
+    await act(async () => {
+      canvasBridge.ensureHostIndex()
+      await new Promise(resolve => setTimeout(resolve, 5))
+    })
+    const afterFirstRead = harness.reads.length
+    expect(afterFirstRead).toBeGreaterThan(0)
+    // The window now knows an id the index does not: re-read once.
+    ids = ['art-seen', 'art-new']
+    harness.push([
+      node(1, { op: 'create', id: 'art-seen', version: 1, html: '<p>a</p>' }),
+      node(2, { op: 'create', id: 'art-new', version: 1, html: '<p>b</p>' }),
+    ])
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 10)) })
+    expect(harness.reads.length).toBe(afterFirstRead + 1)
+  })
+
+  it('a window artifact absent from the index costs at most ONE extra read', async () => {
+    // The host keeps not reporting `art-ghost` (e.g. its route still 403s).
+    // An unconditional re-read would spin forever; the miss ledger bounds it.
+    const harness = bind({ listingIds: () => [] })
+    harness.push([node(1, { op: 'create', id: 'art-ghost', version: 1, html: '<p>g</p>' })])
+    await act(async () => {
+      canvasBridge.ensureHostIndex()
+      await new Promise(resolve => setTimeout(resolve, 5))
+    })
+    const settled = harness.reads.length
+    for (let i = 0; i < 4; i++) {
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 5)) })
+    }
+    expect(harness.reads.length).toBe(settled)
+    expect(settled).toBeLessThanOrEqual(2)
+  })
+
+  it('a FAILED read stays retryable (the latch allowed only one attempt)', async () => {
+    let fail = true
+    const reads: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (!String(url).includes('/artifact/api/list')) return { ok: true, status: 200, json: async () => ({ ok: true }) }
+      reads.push(String(url))
+      if (fail) return { ok: false, status: 403, json: async () => ({}) }
+      return { ok: true, status: 200, json: async () => ({ ok: true, artifacts: [{ id: 'art-a', html: '<p>a</p>' }] }) }
+    }))
+    const session = { getSnapshot: () => ({ nodes: [], runningCalls: [] }), subscribe: () => () => {}, command: async () => ({ ok: true, value: { matched: true } }) }
+    canvasBridge.init({
+      sessions: {
+        list: { getSnapshot: () => ({ current: 's1' }), subscribe: () => () => {} },
+        binding: () => ({ sessionId: 's1', session, ctx: {} }),
+      },
+      get: () => undefined,
+    } as never)
+    await act(async () => {
+      canvasBridge.ensureHostIndex()
+      await new Promise(resolve => setTimeout(resolve, 5))
+    })
+    expect(reads).toHaveLength(1)
+    // The route came up: a later request must be able to succeed.
+    fail = false
+    await act(async () => {
+      canvasBridge.ensureHostIndex()
+      await new Promise(resolve => setTimeout(resolve, 5))
+    })
+    expect(reads.length).toBeGreaterThan(1)
+    expect(canvasBridge.getSnapshot().order).toContain('art-a')
+  })
+
+  it('an invalidation DURING a read is coalesced, not dropped', async () => {
+    // The bug this prevents: an import landing while a read is in flight would
+    // be swallowed by the in-flight guard — the same silent staleness as the
+    // latch, just narrower.
+    const harness = bind({ defer: true, listingIds: () => ['art-a'] })
+    await act(async () => {
+      canvasBridge.ensureHostIndex()
+      await new Promise(resolve => setTimeout(resolve, 2))
+    })
+    expect(harness.reads).toHaveLength(1)
+    // Invalidate while the first read is still hanging.
+    canvasBridge.onImported()
+    harness.release()
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 10)) })
+    expect(harness.reads.length).toBe(2)
+  })
+})
