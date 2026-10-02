@@ -538,11 +538,18 @@ class CanvasBridge {
     }
     // Fallback: the lifecycle snapshot keeps change notifications flowing (and
     // is the whole transcript on older hosts); retry for the chat view meanwhile.
+    //
+    // Through `transcriptOf` like the chat path above: the host's raw session
+    // snapshot is a DIFFERENT type per host version (its fields merely HAPPEN to
+    // overlap with ours on some), and the normalizer is what folds either shape
+    // into the local record. Feeding it in raw type-checked only where the
+    // overlap existed — it failed against the harness source, and would have
+    // dropped a `legacy`-nested transcript on any host that shapes it that way.
     if (this.sessionDisposer === undefined) {
       this.sessionDisposer = session.subscribe(() => {
-        this.ingest(session.getSnapshot(), false)
+        this.ingest(transcriptOf(session.getSnapshot()), false)
       })
-      this.ingest(session.getSnapshot(), true)
+      this.ingest(transcriptOf(session.getSnapshot()), true)
     }
     this.scheduleRetry()
   }
