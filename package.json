@@ -1,5 +1,5 @@
 {
-  "name": "@dsh-external/dsh-html-artifact",
+  "name": "@dsh-external/dsh-canvas",
   "description": "DSH HTML-artifact plugin with a Gemini-canvas-style panel: an `artifact` tool (create/patch/save/revert/read/destroy/list) with EXPLICIT versioning — patch edits the working copy, `save` snapshots it as a new version, `revert` rolls back. Requires the dsh-better-sidebar peer: documents render as a native workbench tab (panes/splits/float/resize) that auto-opens on new versions, navigates 前进/后退 through saved versions, goes fullscreen, and streams generation live; the chat renders only a compact card that opens the canvas.",
   "version": "0.2.0",
   "private": true,
@@ -26,7 +26,7 @@
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.client.json",
     "test": "vitest run",
     "check": "pnpm run typecheck && pnpm run test && pnpm run build",
-    "sync:profile": "bash -c 'set -e; pnpm build >/dev/null; DST=$HOME/.dsh/profiles/web/node_modules/@dsh-external/dsh-html-artifact; rm -rf \"$DST/lib\"; cp -r lib \"$DST/lib\"; echo synced to profile'"
+    "sync:profile": "bash -c 'set -e; pnpm build >/dev/null; DST=$HOME/.dsh/profiles/web/node_modules/@dsh-external/dsh-canvas; rm -rf \"$DST/lib\"; cp -r lib \"$DST/lib\"; echo synced to profile'"
   },
   "dsh": {
     "bundle": {

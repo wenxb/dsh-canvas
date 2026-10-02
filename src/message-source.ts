@@ -25,6 +25,13 @@
  * to `plugin:${plugin}`). Using the same string keeps OLD messages migrated from
  * V3 and NEW ones under ONE kind, so a consumer grouping by kind does not see
  * this plugin as two producers.
+ *
+ * DELIBERATELY NOT UPDATED WHEN THE PLUGIN IS RENAMED. The package is now
+ * `@dsh-external/dsh-canvas`, but this kind stays `plugin:<old package>` because
+ * it is the string the migrator derives from the HISTORICAL package name — the
+ * one already committed to every existing log. Renaming it here would split this
+ * plugin into two producers, which is the exact failure the paragraph above
+ * exists to prevent.
  * @module
  */
 

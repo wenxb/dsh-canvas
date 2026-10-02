@@ -110,7 +110,11 @@ export interface SidebarFace {
   openFile?(scope: { sessionId: string }, path: string, title?: string): void
 }
 
-/** The workbench tab type the canvas registers under. */
+/** The workbench tab type the canvas registers under.
+ *
+ *  The id keeps the plugin's PRE-RENAME string on purpose: better-sidebar
+ *  persists open tabs by this id, so a fresh one would orphan every canvas tab a
+ *  user already has open. It is an identifier, not the plugin's name. */
 export const CANVAS_TAB_TYPE = 'dsh-html-artifact-canvas'
 
 /** One in-flight NON-create op (patch/save/revert) targeting an artifact. */
@@ -220,6 +224,10 @@ function streamOfCall(call: RunningToolCall): StreamPreview | null {
  *
  * Shape is VERSIONED so a future change can migrate instead of throwing away
  * every stored entry on the first mismatch.
+ *
+ * Like CANVAS_TAB_TYPE, the prefix keeps its PRE-RENAME string: it is a durable
+ * storage key, so renaming it would silently drop every stored canvas UI
+ * preference rather than migrate it.
  */
 const UI_STORAGE_PREFIX = 'dsh-html-artifact:canvas-ui:'
 /** Bumped when the persisted shape changes incompatibly; older entries are
@@ -793,7 +801,7 @@ class CanvasBridge {
     try {
       this.openSidebarTabUnsafe()
     } catch (error) {
-      console.warn('[dsh-html-artifact] failed to open the canvas tab:', error)
+      console.warn('[dsh-canvas] failed to open the canvas tab:', error)
     }
   }
 
@@ -1226,7 +1234,7 @@ class CanvasBridge {
     try {
       this.openUi(this.ui(), id)
     } catch (error) {
-      console.warn('[dsh-html-artifact] failed to open the workbench tab:', error)
+      console.warn('[dsh-canvas] failed to open the workbench tab:', error)
     }
     this.publish()
   }
@@ -1262,7 +1270,7 @@ class CanvasBridge {
       sidebar.openFile(scope, file, label)
       return true
     } catch (error) {
-      console.warn('[dsh-html-artifact] openFile failed:', error)
+      console.warn('[dsh-canvas] openFile failed:', error)
       return false
     }
   }

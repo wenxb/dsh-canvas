@@ -1,5 +1,5 @@
 /**
- * dsh-html-artifact host plugin: registers the `artifact` tool — create,
+ * dsh-canvas host plugin: registers the `artifact` tool — create,
  * patch, save, revert, read, destroy, list — over a per-session in-memory
  * store with EXPLICIT versioning: `create` saves 版本 1; `patch` mutates the
  * working copy WITHOUT creating a version (the model batches its edits and
@@ -17,7 +17,7 @@
  * into the agent's next request context: `/artifact-submit` (interaction
  * data) and `/artifact-revert` (roll the working copy back to a saved
  * version).
- * @module @dsh-external/dsh-html-artifact
+ * @module @dsh-external/dsh-canvas
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -48,7 +48,7 @@ import { join, dirname, resolve } from 'node:path'
 import { mkdirSync, writeFileSync } from 'node:fs'
 
 /** Cordis plugin name. */
-export const name = 'dsh-html-artifact'
+export const name = 'dsh-canvas'
 
 /**
  * The wire name of the artifact tool.
@@ -592,7 +592,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         reply(500, { ok: false, error: { code: 'internal', message: error instanceof Error ? error.message : String(error) } })
       }
     },
-  }), 'dsh-html-artifact: /artifact/api/list route')
+  }), 'dsh-canvas: /artifact/api/list route')
 
   // The cross-session library, for the canvas IMPORT picker.
   //
@@ -649,7 +649,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         reply(500, { ok: false, error: { code: 'internal', message: error instanceof Error ? error.message : String(error) } })
       }
     },
-  }), 'dsh-html-artifact: /artifact/api/library route')
+  }), 'dsh-canvas: /artifact/api/library route')
 
   // Interaction submission: the browser half records user interaction data
   // from a sandboxed artifact surface through this slash command (host-side,

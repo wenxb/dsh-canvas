@@ -57,7 +57,7 @@ export function apply(ctx: Context): void {
   })
   // The canvas bridge: current-session tracking + command delivery for the
   // plugin lifetime. Also exposed for manual debugging / e2e probing.
-  ctx.effect(() => canvasBridge.init(ctx), 'dsh-html-artifact: canvas bridge')
+  ctx.effect(() => canvasBridge.init(ctx), 'dsh-canvas: canvas bridge')
   ;(globalThis as { __dshArtifactCanvas?: unknown }).__dshArtifactCanvas = canvasBridge
   // The canvas lives in the better-sidebar workbench as a native tab
   // (panes/splits/float/resize and per-session isolation are the sidebar's
@@ -78,5 +78,5 @@ export function apply(ctx: Context): void {
       const sessionId = (props as { scope?: { sessionId?: string } } | undefined)?.scope?.sessionId
       return sessionId === undefined ? <CanvasTabBody /> : <CanvasTabBody sessionId={sessionId} />
     },
-  }), 'dsh-html-artifact: sidebar tab')
+  }), 'dsh-canvas: sidebar tab')
 }

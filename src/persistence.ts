@@ -142,7 +142,7 @@ export function makePersister(root: string, sessionId: string): ArtifactPersiste
       mkdirSync(dir, { recursive: true })
       writeFileSync(path, content, 'utf-8')
     } catch (error) {
-      console.error(`[dsh-html-artifact] persistence write failed for ${path}:`, error)
+      console.error(`[dsh-canvas] persistence write failed for ${path}:`, error)
     }
   }
 
@@ -170,7 +170,7 @@ export function makePersister(root: string, sessionId: string): ArtifactPersiste
         }
       }
     } catch (error) {
-      console.error('[dsh-html-artifact] persistence remove failed:', error)
+      console.error('[dsh-canvas] persistence remove failed:', error)
     }
   }
 
@@ -209,7 +209,7 @@ export function makePersister(root: string, sessionId: string): ArtifactPersiste
           versions,
         })
       } catch (error) {
-        console.error(`[dsh-html-artifact] skipping corrupt persisted artifact ${id}:`, error)
+        console.error(`[dsh-canvas] skipping corrupt persisted artifact ${id}:`, error)
       }
     }
     return out

@@ -34,7 +34,7 @@ jobs:
           # target lands on the harness checkout below (GITHUB_WORKSPACE itself
           # already carries the repo name, so a root checkout would shift the
           # link target one level too high).
-          path: dsh-html-artifact
+          path: dsh-canvas
 
       - name: Checkout deepseek-harness (plugin build-time dependency source)
         uses: actions/checkout@v4
@@ -69,15 +69,15 @@ jobs:
           pnpm run build:lib
 
       - name: 'Install plugin (link: targets now exist)'
-        working-directory: dsh-html-artifact
+        working-directory: dsh-canvas
         run: pnpm install --frozen-lockfile
 
       - name: Typecheck, test, build
-        working-directory: dsh-html-artifact
+        working-directory: dsh-canvas
         run: pnpm run check
 
       - name: Pack release tarball
-        working-directory: dsh-html-artifact
+        working-directory: dsh-canvas
         run: |
           # The devDependencies are link: into the harness checkout; strip them
           # from the packed manifest (npm pack reads the working package.json)
@@ -86,14 +86,14 @@ jobs:
           mkdir -p dist
           npm pack --pack-destination dist
           # Rename to a versionless fixed name so
-          # releases/latest/download/dsh-external-dsh-html-artifact.tgz always
+          # releases/latest/download/dsh-external-dsh-canvas.tgz always
           # points at the newest build.
           node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));const fixed=p.name.replace(/^@/,'').replace('/','-')+'.tgz';const packed=fs.readdirSync('dist').find(f=>f.endsWith('.tgz'));if(packed&&packed!==fixed){fs.renameSync('dist/'+packed,'dist/'+fixed)}"
 
       - name: Upload release asset
         env:
           GH_TOKEN: ${{ github.token }}
-        working-directory: dsh-html-artifact
+        working-directory: dsh-canvas
         run: |
           # Release-publish runs attach to that release; a manual dispatch
           # attaches to the latest release unless a tag input is given.

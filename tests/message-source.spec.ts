@@ -43,7 +43,12 @@ function producerKind(plugin: string): string {
   return renamed[plugin] ?? `plugin:${plugin}`
 }
 
-const PACKAGE_NAME = '@dsh-external/dsh-html-artifact'
+/** The package name this plugin has NOW (see package.json). */
+const PACKAGE_NAME = '@dsh-external/dsh-canvas'
+
+/** The package name it had BEFORE the rename to dsh-canvas. The notice kind is
+ *  still bound to THIS one: it is already committed to every existing log. */
+const LEGACY_PACKAGE_NAME = '@dsh-external/dsh-html-artifact'
 
 describe('the artifact notice source is accepted by the native validator', () => {
   it('passes the producer-owned check that the retired wrapper failed', () => {
@@ -61,7 +66,15 @@ describe('the artifact notice source is accepted by the native validator', () =>
   it('uses the SAME kind the migrator produces for this package', () => {
     // Old messages migrated out of V3 and new ones must share one kind, or a
     // consumer grouping by kind sees two producers for one plugin.
-    expect(NOTICE_SOURCE_KIND).toBe(producerKind(PACKAGE_NAME))
+    expect(NOTICE_SOURCE_KIND).toBe(producerKind(LEGACY_PACKAGE_NAME))
+  })
+
+  it('does NOT follow the rename, so one plugin stays one producer', () => {
+    // Pinned on purpose: the migrator derives the kind for HISTORICAL messages
+    // from the package name they were written under. Rebinding this string to the
+    // new name would put old and new messages under two kinds, which is the exact
+    // split the test above exists to prevent.
+    expect(NOTICE_SOURCE_KIND).not.toBe(producerKind(PACKAGE_NAME))
   })
 
   it('declares the notice form, the documented shape for a one-off account', () => {

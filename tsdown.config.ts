@@ -1,5 +1,5 @@
 /**
- * tsdown preset for dsh-html-artifact: an ESM node half with declarations plus
+ * tsdown preset for dsh-canvas: an ESM node half with declarations plus
  * a browser half (lib/client.js) wrapped for the harness client-plugin loader.
  * The browser half keeps the loader's platform module table external
  * (react, cordis, ui-slots, primitives, runtime) and inlines everything else;
@@ -14,7 +14,7 @@ import { transform } from 'lightningcss'
 import type { UserConfig } from 'tsdown'
 
 const require = createRequire(import.meta.url)
-const PLUGIN_ID = '@dsh-external/dsh-html-artifact'
+const PLUGIN_ID = '@dsh-external/dsh-canvas'
 
 /** Module specifiers the dsh web shell shares into its frozen module table. */
 const PLATFORM_MODULES = [

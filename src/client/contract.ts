@@ -1,5 +1,5 @@
 /**
- * Local toolview contract for the dsh-html-artifact plugin: the owner currency
+ * Local toolview contract for the dsh-canvas plugin: the owner currency
  * the stock ui-tool rows supply at `tool.call.toolview` and the pure
  * artifact-card derivation, declared locally so this plugin never imports the
  * stock ui-tool contract (one-way dependency). The `declare module` merge

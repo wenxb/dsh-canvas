@@ -3,5 +3,5 @@
 # (every agent's scope chain selects it) and mounts the browser half (the
 # keyed `tool.call.toolview` atomic view) from the bundled client.js.
 - insert:
-    - id: dsh-html-artifact
-      name: '@dsh-external/dsh-html-artifact'
+    - id: dsh-canvas
+      name: '@dsh-external/dsh-canvas'
