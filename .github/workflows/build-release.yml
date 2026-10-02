@@ -40,10 +40,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: deepseek-ai/deepseek-harness
-          # rc.5-era master (npm-public merge); the plugin's link: devDependencies
-          # resolve into this checkout at ../dsh2026/deepseek-harness/... — the
-          # layout this repo's pnpm-lock.yaml records.
-          ref: 47f943859bef60e4160492346772ded9b24f765a
+          # dsh-v0.1.5-rc.2 (tag → commit fb2c4b9e) — the DSH the plugin's source
+          # actually targets: its devDependencies resolve against `dsh@0.1.5-rc.2` on
+          # the author's machine. The previous pin (47f9438) PREDATES two packages the
+          # client half imports, `@deepseek-ai/dsh-api-session-controller` and
+          # `@deepseek-ai/dsh-client-ui-chat`, so no install could ever resolve. The ref
+          # is a commit rather than the tag, so the build stays reproducible.
+          ref: fb2c4b9e698e30edb738bca4cf0618587db7d203
           path: dsh2026/deepseek-harness
           fetch-depth: 1
 
@@ -68,9 +71,58 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm run build:lib
 
+      - name: 'Repoint the devDependencies at the checked-out harness'
+        working-directory: dsh-canvas
+        run: |
+          # WHY THIS EXISTS: the committed package.json links every @deepseek-ai/*
+          # devDependency at an ABSOLUTE path inside the author's machine
+          # ($HOME/.nvm/versions/node/*/lib/node_modules/@deepseek-ai/dsh/node_modules/…),
+          # and pnpm-lock.yaml records those same specifiers — so a runner died with
+          #   ENOENT …/@deepseek-ai/cordis  (exit 254)
+          # before it ever reached a build. Each absolute link is repointed at the
+          # package of the SAME NAME inside the harness checkout above, located by
+          # SCANNING its package.json files: no path table to rot when the harness
+          # moves a package, and a genuinely missing package fails loudly here instead
+          # of silently shipping a broken build. (`file:./stubs/…` links are relative
+          # already — portable, therefore untouched.)
+          node -e '
+            const fs = require("fs"), path = require("path")
+            const HARNESS = "../dsh2026/deepseek-harness"
+            const byName = new Map()
+            const walk = (dir) => {
+              for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                if (entry.name === "node_modules" || entry.name === ".git") continue
+                const full = path.join(dir, entry.name)
+                if (entry.isDirectory()) { walk(full); continue }
+                if (entry.name !== "package.json") continue
+                try {
+                  const name = JSON.parse(fs.readFileSync(full, "utf8")).name
+                  if (typeof name === "string" && !byName.has(name)) byName.set(name, path.dirname(full))
+                } catch {}
+              }
+            }
+            walk(HARNESS)
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"))
+            const dev = pkg.devDependencies ?? {}
+            const moved = []
+            for (const [name, spec] of Object.entries(dev)) {
+              if (typeof spec !== "string" || !spec.startsWith("file:/")) continue
+              const dir = byName.get(name)
+              if (dir === undefined) {
+                throw new Error("the harness checkout at the pinned ref has no package named " + name + " (spec: " + spec + ") — bump the ref instead of stubbing it")
+              }
+              dev[name] = "link:" + path.relative(process.cwd(), dir).split(path.sep).join("/")
+              moved.push(name)
+            }
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n")
+            console.log("repointed " + moved.length + " absolute link(s):", moved.join(", "))
+          '
+
       - name: 'Install plugin (link: targets now exist)'
         working-directory: dsh-canvas
-        run: pnpm install --frozen-lockfile
+        # --no-frozen-lockfile: the lock still records the ABSOLUTE specifiers that
+        # were just rewritten, so a frozen install would reject the fixed manifest.
+        run: pnpm install --no-frozen-lockfile
 
       - name: Typecheck, test, build
         working-directory: dsh-canvas
