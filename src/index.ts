@@ -410,7 +410,15 @@ function ensureFromLog(agent: Agent, store: ArtifactStore, id: string | undefine
       const patch = readPatchArgs(args)
       // Attach the cause only when it is actually a patch; a missing one leaves
       // the fold to flag divergence instead of silently doing nothing.
-      if (patch !== undefined) candidate.patch = patch
+      //
+      // On a CLONE: the host freezes every event payload, so assigning into this
+      // meta threw "Cannot add property patch, object is not extensible" — and
+      // since every replay-backed op walks this path, ONE patch in the log took
+      // read/save/revert/export/list/destroy down with it.
+      if (patch !== undefined) {
+        metas.push({ ...candidate, patch } as unknown as ArtifactMetaLike)
+        continue
+      }
     }
     metas.push(candidate as unknown as ArtifactMetaLike)
   }
@@ -841,6 +849,29 @@ export function apply(ctx: Context, config: Config = {}): void {
           interactive: { type: 'boolean' },
           path: { type: 'string' },
           dir: { type: 'string' },
+          // `history` names the SOURCE artifact it read; `import` reports the copy
+          // it made, and `origin` is that copy's `sessionId/artifactId` breadcrumb.
+          sessionId: { type: 'string' },
+          artifactId: { type: 'string' },
+          // ONE key, two shapes: `import` reports how many versions it carried
+          // over (a count), `history` reports the versions themselves.
+          versions: {
+            oneOf: [
+              { type: 'integer' },
+              {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    version: { type: 'integer', required: true },
+                    time: { type: 'integer', required: true },
+                    bytes: { type: 'integer', required: true },
+                  },
+                },
+              },
+            ],
+          },
           origin: { type: 'string' },
           bytes: { type: 'integer' },
           sessions: {
@@ -879,6 +910,16 @@ export function apply(ctx: Context, config: Config = {}): void {
                 version: { type: 'integer', required: true },
                 bytes: { type: 'integer', required: true },
                 title: { type: 'string' },
+                // Present only on an artifact that was IMPORTED from another
+                // session: `list` reports where the working copy came from.
+                origin: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    sessionId: { type: 'string', required: true },
+                    artifactId: { type: 'string', required: true },
+                  },
+                },
               },
             },
           },

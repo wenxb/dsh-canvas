@@ -100,6 +100,22 @@ function patchedLog(options: { withArgs?: boolean; hash?: string } = {}): Event[
   return events
 }
 
+/**
+ * Freeze a payload the way the host does: an event's `data` is NOT extensible, so
+ * any code that assigns into a meta throws instead of silently succeeding.
+ */
+function deepFreeze(value: unknown): void {
+  if (value === null || typeof value !== 'object') return
+  for (const child of Object.values(value)) deepFreeze(child)
+  Object.freeze(value)
+}
+
+/** The same log, with every event payload frozen as the real host delivers it. */
+function frozenLog(events: Event[]): Event[] {
+  for (const event of events) if (event.data !== undefined) deepFreeze(event.data)
+  return events
+}
+
 /** Run one tool op against a synthetic session log. */
 async function runWithLog(events: Event[], args: unknown): Promise<Record<string, unknown>> {
   root = mkdtempSync(join(tmpdir(), 'dsh-artifact-replay-'))
@@ -116,6 +132,16 @@ async function runWithLog(events: Event[], args: unknown): Promise<Record<string
 }
 
 describe('a log whose patch carries only its cause still replays', () => {
+  it('replays even when the host FREEZES the event metas', async () => {
+    // Regression: the cause used to be attached by ASSIGNING into the event meta.
+    // The host freezes every event payload, so that threw
+    //   "Cannot add property patch, object is not extensible"
+    // and — because every replay-backed op walks this path — ONE patch in the log
+    // broke read/save/revert/export/list/destroy for the whole session.
+    const value = await runWithLog(frozenLog(patchedLog()), { op: 'read', id: 'art-a' })
+    expect(value.html).toBe('<body><h1>EDITED</h1></body>')
+  })
+
   it('reconstructs the PATCHED working copy from the tool call arguments', async () => {
     const value = await runWithLog(patchedLog(), { op: 'read', id: 'art-a' })
     // The store was built from the log alone (no disk cache in a fresh tmp dir).
